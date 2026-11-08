@@ -565,15 +565,14 @@ void WorldSession::HandleTransmogOutfitUpdateSlots(WorldPackets::Transmogrificat
 
         cost = static_cast<uint64>(std::clamp(costMultiplier, 0.0f, 1.0f) * cost);
 
-        // The slot scan above is what the server price is based on. A client quote that does not match it still refuses
-        // the save. Accepting the save and charging the server price anyway is a separate optional patch: a wrong server
-        // total would otherwise be taken with no second check.
+        // OPTIONAL. The ready branch refuses this save. Here a mismatched quote is logged and the server total is
+        // still what ModifyMoney charges. That removes the second check: if this total is wrongly 0, the outfit saves
+        // for free. Collection ownership checks above are unchanged.
         if (!ClassicUpstream::TransmogQuotedPriceMatches(cost, transmogOutfitUpdateSlots.Cost))
-        {
-            TC_LOG_ERROR("entities.player.cheat", "{} WorldSession::HandleTransmogOutfitUpdateSlots - player sent invalid cost {} (server {}).",
-                GetPlayerInfo(), transmogOutfitUpdateSlots.Cost, cost);
-            return;
-        }
+            TC_LOG_WARN("entities.player", "{} WorldSession::HandleTransmogOutfitUpdateSlots - client price {} differs from server price {} "
+                "(level {}, outfit {}, {} slots), charging the server price.",
+                GetPlayerInfo(), transmogOutfitUpdateSlots.Cost, cost, _player->GetLevel(), transmogOutfitUpdateSlots.OutfitID,
+                transmogOutfitUpdateSlots.Slots.size());
 
         if (!_player->HasEnoughMoney(cost))
         {
