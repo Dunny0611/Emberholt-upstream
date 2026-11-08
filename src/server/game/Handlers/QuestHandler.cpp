@@ -16,6 +16,7 @@
  */
 
 #include "WorldSession.h"
+#include "Classic/ClassicUpstreamPolicy.h"
 #include "Battleground.h"
 #include "Common.h"
 #include "Creature.h"
@@ -824,6 +825,13 @@ void WorldSession::HandleUiMapQuestLinesRequest(WorldPackets::Quest::UiMapQuestL
     WorldPackets::Quest::UiMapQuestLinesResponse response;
     response.UiMapID = uiMap->ID;
 
+    // OPTIONAL. Quests with neither a Classic minimum level nor a Classic quest level are left off the map.
+    // A valid custom quest that was never given those columns disappears with the later-expansion markers.
+    auto isClassicQuest = [](Quest const* quest)
+    {
+        return ClassicUpstream::QuestHasClassicMapLevelData(quest->GetClassicMinLevel(), quest->GetClassicQuestLevel());
+    };
+
     if (std::vector<uint32> const* questLines = sObjectMgr->GetUiMapQuestLinesList(uiMap->ID))
     {
         for (uint32 questLineId : *questLines)
@@ -833,10 +841,15 @@ void WorldSession::HandleUiMapQuestLinesRequest(WorldPackets::Quest::UiMapQuestL
                 continue;
 
             bool isQuestLineCompleted = true;
+            bool hasClassicQuest = false;
             for (QuestLineXQuestEntry const* questLineQuest : questLineQuests)
             {
                 if (Quest const* quest = sObjectMgr->GetQuestTemplate(questLineQuest->QuestID))
                 {
+                    if (!isClassicQuest(quest))
+                        continue;
+
+                    hasClassicQuest = true;
                     if (_player->CanTakeQuest(quest, false))
                         response.QuestLineXQuestIDs.push_back(questLineQuest->ID);
 
@@ -845,7 +858,7 @@ void WorldSession::HandleUiMapQuestLinesRequest(WorldPackets::Quest::UiMapQuestL
                 }
             }
 
-            if (!isQuestLineCompleted)
+            if (hasClassicQuest && !isQuestLineCompleted)
                 response.QuestLineIDs.push_back(questLineId);
         }
     }
@@ -854,7 +867,7 @@ void WorldSession::HandleUiMapQuestLinesRequest(WorldPackets::Quest::UiMapQuestL
     {
         for (uint32 questId : *quests)
             if (Quest const* quest = sObjectMgr->GetQuestTemplate(questId))
-                if (_player->CanTakeQuest(quest, false))
+                if (isClassicQuest(quest) && _player->CanTakeQuest(quest, false))
                     response.QuestIDs.push_back(questId);
     }
 

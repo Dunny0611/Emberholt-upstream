@@ -97,6 +97,12 @@ inline uint32_t AmmoDisplayOrPlainArrow(uint32_t displayId, bool drawable)
     return displayId;
 }
 
+// True when a quest has Classic level data. Level 0 and negative values do not count, so an unfilled custom quest is excluded.
+inline bool QuestHasClassicMapLevelData(int32_t classicMinLevel, int32_t classicQuestLevel)
+{
+    return classicMinLevel > 0 || classicQuestLevel > 0;
+}
+
 struct TimedListEvent
 {
     uint32_t eventType = 0;
@@ -195,6 +201,11 @@ inline std::vector<std::string> RunSelfTest()
     Expect(failures, AmmoDisplayOrPlainArrow(737993u, false) == PlainArrowDisplayId, "ammo without a drawable display uses the plain arrow");
     Expect(failures, AmmoDisplayOrPlainArrow(MonsterFireArrowDisplayId, true) == MonsterFireArrowDisplayId, "a drawable display is not replaced");
     Expect(failures, PlainArrowDisplayId != MonsterFireArrowDisplayId, "the fallback is not the fire arrow");
+
+    Expect(failures, !QuestHasClassicMapLevelData(0, 0), "unset classic levels are not map data");
+    Expect(failures, !QuestHasClassicMapLevelData(-1, 0), "a negative classic level is not map data");
+    Expect(failures, QuestHasClassicMapLevelData(1, 0), "a classic minimum level counts");
+    Expect(failures, QuestHasClassicMapLevelData(0, 1), "a classic quest level counts");
 
     Expect(failures, !TimedActionListIsInstant({}), "an empty called list is not run inline");
     TimedListEvent const instantUpdate{ SmartEventUpdate, 0, 0, 0 };
