@@ -16,6 +16,7 @@
  */
 
 #include "WorldSession.h"
+#include "Classic/ClassicUpstreamPolicy.h"
 #include "CollectionMgr.h"
 #include "DB2Stores.h"
 #include "Item.h"
@@ -25,6 +26,7 @@
 #include "Player.h"
 #include "TransmogMgr.h"
 #include "TransmogrificationPackets.h"
+#include <vector>
 
 void WorldSession::HandleTransmogrifyItems(WorldPackets::Transmogrification::TransmogrifyItems& transmogrifyItems)
 {
@@ -524,17 +526,21 @@ void WorldSession::HandleTransmogOutfitUpdateSlots(WorldPackets::Transmogrificat
 
     if (!transmogOutfitUpdateSlots.UseAvailableDiscount)
     {
-        auto oldSlotItr = transmogOutfit->Slots.begin();
-        auto oldSlotEnd = transmogOutfit->Slots.end();
+        std::vector<ClassicUpstream::TransmogStoredSlot> storedSlots;
+        storedSlots.reserve(transmogOutfit->Slots.size());
+        for (UF::TransmogOutfitSlotData const& slotData : transmogOutfit->Slots)
+            storedSlots.push_back({ uint32(*slotData.Slot), uint32(*slotData.SlotOption), uint32(*slotData.ItemModifiedAppearanceID), uint32(*slotData.SpellItemEnchantmentID) });
+
         for (WorldPackets::Transmogrification::TransmogOutfitSlotData const& slot : transmogOutfitUpdateSlots.Slots)
         {
-            oldSlotItr = std::ranges::find(oldSlotItr, oldSlotEnd,
-                std::pair(AsUnderlyingType(slot.Slot), AsUnderlyingType(slot.SlotOption)),
-                [](UF::TransmogOutfitSlotData const& slotData) { return std::pair(*slotData.Slot, *slotData.SlotOption); });
+            // Searched from the start for every slot: the client does not always send the slots in the stored order, and a
+            // slot that is not stored yet used to leave the iterator past the end.
+            ClassicUpstream::TransmogStoredSlotMatch const oldSlot = ClassicUpstream::FindStoredTransmogSlot(storedSlots,
+                AsUnderlyingType(slot.Slot), AsUnderlyingType(slot.SlotOption));
 
             auto [slotEntry, slotOptionEntry, _] = *TransmogMgr::GetSlotAndOption(slot.Slot, slot.SlotOption);
 
-            if (slot.AppearanceDisplayType == TransmogOutfitDisplayType::Assigned && oldSlotItr->ItemModifiedAppearanceID != slot.ItemModifiedAppearanceID)
+            if (slot.AppearanceDisplayType == TransmogOutfitDisplayType::Assigned && oldSlot.appearance != slot.ItemModifiedAppearanceID)
             {
                 ItemModifiedAppearanceEntry const* itemModifiedAppearance = sItemModifiedAppearanceStore.LookupEntry(slot.ItemModifiedAppearanceID);
                 if (!itemModifiedAppearance || !sTransmogHolidayStore.HasRecord(itemModifiedAppearance->ItemID))
@@ -547,7 +553,7 @@ void WorldSession::HandleTransmogOutfitUpdateSlots(WorldPackets::Transmogrificat
                 }
             }
 
-            if (slot.IllusionDisplayType == TransmogOutfitDisplayType::Assigned && oldSlotItr->SpellItemEnchantmentID != slot.SpellItemEnchantmentID)
+            if (slot.IllusionDisplayType == TransmogOutfitDisplayType::Assigned && oldSlot.illusion != slot.SpellItemEnchantmentID)
             {
                 if (slotEntry)
                     cost = static_cast<uint64>(std::floor(baseCost * slotEntry->IllusionCostMultiplier)) + cost;
@@ -555,16 +561,17 @@ void WorldSession::HandleTransmogOutfitUpdateSlots(WorldPackets::Transmogrificat
                 if (slotOptionEntry)
                     cost = static_cast<uint64>(std::floor(baseCost * slotOptionEntry->IllusionCostMultiplier)) + cost;
             }
-
-            ++oldSlotItr;
         }
 
         cost = static_cast<uint64>(std::clamp(costMultiplier, 0.0f, 1.0f) * cost);
 
-        if (cost != transmogOutfitUpdateSlots.Cost)
+        // The slot scan above is what the server price is based on. A client quote that does not match it still refuses
+        // the save. Accepting the save and charging the server price anyway is a separate optional patch: a wrong server
+        // total would otherwise be taken with no second check.
+        if (!ClassicUpstream::TransmogQuotedPriceMatches(cost, transmogOutfitUpdateSlots.Cost))
         {
-            TC_LOG_ERROR("entities.player.cheat", "{} WorldSession::HandleTransmogOutfitUpdateSlots - player sent invalid cost {}.",
-                GetPlayerInfo(), transmogOutfitUpdateSlots.Cost);
+            TC_LOG_ERROR("entities.player.cheat", "{} WorldSession::HandleTransmogOutfitUpdateSlots - player sent invalid cost {} (server {}).",
+                GetPlayerInfo(), transmogOutfitUpdateSlots.Cost, cost);
             return;
         }
 
