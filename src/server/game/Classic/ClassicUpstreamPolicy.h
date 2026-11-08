@@ -97,11 +97,6 @@ inline uint32_t AmmoDisplayOrPlainArrow(uint32_t displayId, bool drawable)
     return displayId;
 }
 
-inline bool QuestHasClassicMapLevelData(int32_t classicMinLevel, int32_t classicQuestLevel)
-{
-    return classicMinLevel > 0 || classicQuestLevel > 0;
-}
-
 struct TimedListEvent
 {
     uint32_t eventType = 0;
@@ -155,10 +150,10 @@ inline TransmogStoredSlotMatch FindStoredTransmogSlot(std::span<TransmogStoredSl
     return {};
 }
 
-// The amount taken from the player is the server price. The client-quoted price is only compared and logged.
-inline uint64_t TransmogServerCharge(uint64_t serverCost)
+// Ready behavior: the save proceeds only when the client quote equals the server total. The amount charged is that total.
+inline bool TransmogQuotedPriceMatches(uint64_t serverCost, uint64_t clientCost)
 {
-    return serverCost;
+    return serverCost == clientCost;
 }
 
 inline void Expect(std::vector<std::string>& failures, bool condition, char const* message)
@@ -201,11 +196,6 @@ inline std::vector<std::string> RunSelfTest()
     Expect(failures, AmmoDisplayOrPlainArrow(MonsterFireArrowDisplayId, true) == MonsterFireArrowDisplayId, "a drawable display is not replaced");
     Expect(failures, PlainArrowDisplayId != MonsterFireArrowDisplayId, "the fallback is not the fire arrow");
 
-    Expect(failures, !QuestHasClassicMapLevelData(0, 0), "a quest with no classic level is omitted from the map");
-    Expect(failures, !QuestHasClassicMapLevelData(-1, 0), "a negative classic level is not classic map data");
-    Expect(failures, QuestHasClassicMapLevelData(1, 0), "a classic minimum level keeps the quest on the map");
-    Expect(failures, QuestHasClassicMapLevelData(0, 1), "a classic quest level keeps the quest on the map");
-
     Expect(failures, !TimedActionListIsInstant({}), "an empty called list is not run inline");
     TimedListEvent const instantUpdate{ SmartEventUpdate, 0, 0, 0 };
     TimedListEvent const instantOoc{ SmartEventUpdateOoc, 0, 0, 0 };
@@ -239,8 +229,9 @@ inline std::vector<std::string> RunSelfTest()
     Expect(failures, later.found && later.appearance == 22, "a slot stored out of order still matches");
     Expect(failures, option.found && option.illusion == 43, "slot option is part of the match");
     Expect(failures, !missing.found && missing.appearance == 0 && missing.illusion == 0, "a new slot has no previous appearance");
-    Expect(failures, TransmogServerCharge(210) == 210u, "the charged price is the server price");
-    Expect(failures, TransmogServerCharge(210) != 0u, "a client quote of zero does not become the charge");
+    Expect(failures, TransmogQuotedPriceMatches(210, 210), "a matching client quote is accepted");
+    Expect(failures, !TransmogQuotedPriceMatches(210, 0), "a zero client quote does not match a positive server price");
+    Expect(failures, !TransmogQuotedPriceMatches(210, 209), "an off-by-one client quote is refused");
 
     return failures;
 }

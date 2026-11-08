@@ -564,16 +564,16 @@ void WorldSession::HandleTransmogOutfitUpdateSlots(WorldPackets::Transmogrificat
         }
 
         cost = static_cast<uint64>(std::clamp(costMultiplier, 0.0f, 1.0f) * cost);
-        cost = ClassicUpstream::TransmogServerCharge(cost);
 
-        // The client still works out a different price than this in some cases. The save is no longer refused: the price
-        // worked out here is charged, and both numbers are logged. Collection ownership checks above are unchanged.
-        // This drops the previous fail-closed cheat return. Downstream comparison should confirm that change is wanted.
-        if (cost != transmogOutfitUpdateSlots.Cost)
-            TC_LOG_WARN("entities.player", "{} WorldSession::HandleTransmogOutfitUpdateSlots - client price {} differs from server price {} "
-                "(level {}, outfit {}, {} slots), charging the server price.",
-                GetPlayerInfo(), transmogOutfitUpdateSlots.Cost, cost, _player->GetLevel(), transmogOutfitUpdateSlots.OutfitID,
-                transmogOutfitUpdateSlots.Slots.size());
+        // The slot scan above is what the server price is based on. A client quote that does not match it still refuses
+        // the save. Accepting the save and charging the server price anyway is a separate optional patch: a wrong server
+        // total would otherwise be taken with no second check.
+        if (!ClassicUpstream::TransmogQuotedPriceMatches(cost, transmogOutfitUpdateSlots.Cost))
+        {
+            TC_LOG_ERROR("entities.player.cheat", "{} WorldSession::HandleTransmogOutfitUpdateSlots - player sent invalid cost {} (server {}).",
+                GetPlayerInfo(), transmogOutfitUpdateSlots.Cost, cost);
+            return;
+        }
 
         if (!_player->HasEnoughMoney(cost))
         {

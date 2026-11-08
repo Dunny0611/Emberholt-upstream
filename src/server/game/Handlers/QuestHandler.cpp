@@ -16,7 +16,6 @@
  */
 
 #include "WorldSession.h"
-#include "Classic/ClassicUpstreamPolicy.h"
 #include "Battleground.h"
 #include "Common.h"
 #include "Creature.h"
@@ -825,13 +824,6 @@ void WorldSession::HandleUiMapQuestLinesRequest(WorldPackets::Quest::UiMapQuestL
     WorldPackets::Quest::UiMapQuestLinesResponse response;
     response.UiMapID = uiMap->ID;
 
-    // Classic 1.60: the map lists come from retail data. Later-expansion quests have no Classic level, so their
-    // ContentTuning let a low character see them. Only quests with Classic level data are offered on the map.
-    auto isClassicQuest = [](Quest const* quest)
-    {
-        return ClassicUpstream::QuestHasClassicMapLevelData(quest->GetClassicMinLevel(), quest->GetClassicQuestLevel());
-    };
-
     if (std::vector<uint32> const* questLines = sObjectMgr->GetUiMapQuestLinesList(uiMap->ID))
     {
         for (uint32 questLineId : *questLines)
@@ -841,15 +833,10 @@ void WorldSession::HandleUiMapQuestLinesRequest(WorldPackets::Quest::UiMapQuestL
                 continue;
 
             bool isQuestLineCompleted = true;
-            bool hasClassicQuest = false;
             for (QuestLineXQuestEntry const* questLineQuest : questLineQuests)
             {
                 if (Quest const* quest = sObjectMgr->GetQuestTemplate(questLineQuest->QuestID))
                 {
-                    if (!isClassicQuest(quest))
-                        continue;
-
-                    hasClassicQuest = true;
                     if (_player->CanTakeQuest(quest, false))
                         response.QuestLineXQuestIDs.push_back(questLineQuest->ID);
 
@@ -858,7 +845,7 @@ void WorldSession::HandleUiMapQuestLinesRequest(WorldPackets::Quest::UiMapQuestL
                 }
             }
 
-            if (hasClassicQuest && !isQuestLineCompleted)
+            if (!isQuestLineCompleted)
                 response.QuestLineIDs.push_back(questLineId);
         }
     }
@@ -867,7 +854,7 @@ void WorldSession::HandleUiMapQuestLinesRequest(WorldPackets::Quest::UiMapQuestL
     {
         for (uint32 questId : *quests)
             if (Quest const* quest = sObjectMgr->GetQuestTemplate(questId))
-                if (isClassicQuest(quest) && _player->CanTakeQuest(quest, false))
+                if (_player->CanTakeQuest(quest, false))
                     response.QuestIDs.push_back(questId);
     }
 
