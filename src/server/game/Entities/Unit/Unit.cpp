@@ -16,6 +16,7 @@
  */
 
 #include "Unit.h"
+#include "Classic/ClassicUpstreamPolicy.h"
 #include "DeathRecap.h"
 #include "AbstractFollower.h"
 #include "Battlefield.h"
@@ -7270,6 +7271,10 @@ int32 Unit::SpellBaseDamageBonusDone(SpellSchoolMask schoolMask) const
         // Classic 1.60 item stats: damage done of one school
         DoneAdvertisedBenefit += thisPlayer->GetClassicSpellDamageDone(schoolMask);
 
+        // Classic 1.60 item stats: damage done by all magical spells (ITEM_MOD_SPELL_DAMAGE_DONE), not by physical ones
+        if (ClassicUpstream::SpellDamageBonusApplies(schoolMask))
+            DoneAdvertisedBenefit += thisPlayer->GetClassicSpellDamageDoneBonus();
+
         // Classic 1.60: intellect gives mana (Player::GetManaBonusFromIntellect), no spell power (retail: 1 per point)
 
         // Damage bonus from stats
@@ -7770,6 +7775,9 @@ int32 Unit::SpellBaseHealingBonusDone(SpellSchoolMask schoolMask) const
     {
         // Base value
         advertisedBenefit += ToPlayer()->GetBaseSpellPowerBonus();
+
+        // Classic 1.60 item stats: healing done (ITEM_MOD_SPELL_HEALING_DONE)
+        advertisedBenefit += ToPlayer()->GetClassicSpellHealingDoneBonus();
 
         // Classic 1.60: intellect gives mana (Player::GetManaBonusFromIntellect), no healing power (retail: 1 per point)
 

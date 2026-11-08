@@ -16,6 +16,7 @@
  */
 
 #include "Spell.h"
+#include "Classic/ClassicUpstreamPolicy.h"
 #include "DeathRecap.h"
 #include "AzeriteEmpoweredItem.h"
 #include "Battlefield.h"
@@ -4979,24 +4980,19 @@ int32 Spell::GetSpellCastDataAmmo()
             ammoInventoryType = pItem->GetTemplate()->GetInventoryType();
             if (ammoInventoryType == INVTYPE_THROWN)
             {
-                ammoDisplayID = pItem->GetDisplayId(playerCaster);
-                // A thrown weapon with the generic 1.60 display, or none, is drawn by the client as a white square.
-                if (!ammoDisplayID || ammoDisplayID >= 500000)
-                    ammoDisplayID = 23211;
+                ammoDisplayID = ClassicUpstream::ThrownWeaponAmmoDisplay(pItem->GetDisplayId(playerCaster));
             }
             else if (ItemTemplate const* ammo = sObjectMgr->GetItemTemplate(playerCaster->GetAmmoId()))   // Classic 1.60 ammo slot
             {
-                // The ammo's own display, as a real player's cast sends it. The generic 1.60 ammo display (737992 / 737993) has no model and the
-                // client draws a white box for it; bots take ammo that has its own display (Player::AutoSelectAmmo), so
+                // The ammo's own display, as a real player's cast sends it. The generic 1.60 ammo display (737992 / 737993) has no material and
+                // the client draws a white box for it; bots take ammo that has its own display (Player::AutoSelectAmmo), so
                 // this is the fallback only: an arrow model, for bullets too (every classic bullet has the generic display).
-                ammoDisplayID = Player::GetAmmoDisplayId(ammo);
-                if (!Player::HasDrawableAmmoDisplay(ammo))
-                    ammoDisplayID = 23211;   // an arrow display seen to draw (item 19082); no classic bullet has a display of its own
+                ammoDisplayID = ClassicUpstream::AmmoDisplayOrPlainArrow(Player::GetAmmoDisplayId(ammo), Player::HasDrawableAmmoDisplay(ammo));
                 ammoInventoryType = INVTYPE_AMMO;
             }
             else if (playerCaster->HasAura(46699))      // Requires No Ammo
             {
-                ammoDisplayID = 5996;                   // normal arrow
+                ammoDisplayID = ClassicUpstream::PlainArrowDisplayId; // normal arrow
                 ammoInventoryType = INVTYPE_AMMO;
             }
         }
@@ -5024,7 +5020,7 @@ int32 Spell::GetSpellCastDataAmmo()
                                 break;
                             case ITEM_SUBCLASS_WEAPON_BOW:
                             case ITEM_SUBCLASS_WEAPON_CROSSBOW:
-                                ammoDisplayID = 5996;       // is this need fixing?
+                                ammoDisplayID = ClassicUpstream::PlainArrowDisplayId; // plain arrow, same fallback as a player shot
                                 ammoInventoryType = INVTYPE_AMMO;
                                 break;
                             case ITEM_SUBCLASS_WEAPON_GUN:
@@ -7969,17 +7965,10 @@ SpellCastResult Spell::CheckItems(int32* param1 /*= nullptr*/, int32* param2 /*=
                         return SPELL_FAILED_NOT_TRADEABLE;
                 }
 
-                // Apply item level restriction
-                if (!m_spellInfo->HasAttribute(SPELL_ATTR2_ALLOW_LOW_LEVEL_BUFF))
-                {
-                    uint32 requiredLevel = item->GetRequiredLevel();
-                    if (!requiredLevel)
-                        requiredLevel = item->GetItemLevel(item->GetOwner());
-
-                    if (requiredLevel < m_spellInfo->BaseLevel)
-                        return SPELL_FAILED_LOWLEVEL;
-                }
-                if (m_CastItem && m_spellInfo->MaxLevel > 0 && item->GetItemLevel(item->GetOwner()) > m_spellInfo->MaxLevel)
+                // Classic 1.60 (vanilla): no item level restriction. Poisons, sharpening stones, weightstones,
+                // oils and shaman imbues go on any weapon. The retail check refused every weapon below the spell level.
+                if (ClassicUpstream::EvaluateTemporaryEnchantLevel(m_CastItem != nullptr, m_spellInfo->MaxLevel, item->GetItemLevel(item->GetOwner()))
+                    == ClassicUpstream::TemporaryEnchantLevelResult::TooHighLevel)
                     return SPELL_FAILED_HIGHLEVEL;
                 break;
             }
