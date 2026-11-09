@@ -15,6 +15,8 @@ applies that directory by itself.
    Playerbot.Account.Horde = 0
    Playerbot.Account.MaxCharacters = 10
    Playerbot.PvP = 0
+   Playerbot.Debug = 0
+   # worldserver.conf: Logger.playerbot=3,Console Server
 
    The two account ids must already exist, must differ, and must be player
    security. A GM, admin, or console account is refused. This build does not

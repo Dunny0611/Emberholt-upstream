@@ -135,6 +135,7 @@ HostileFacts FactsFor(Player const* bot, Unit const* unit, bool pvpEnabled)
     facts.creature = unit->GetTypeId() == TYPEID_UNIT;
     facts.alive = unit->IsAlive();
     facts.validAttack = bot->IsValidAttackTarget(unit);
+    facts.factionHostile = bot->IsHostileTo(unit) || unit->IsHostileTo(bot);
     facts.botLevel = bot->GetLevel();
     facts.distance = bot->GetDistance(unit);
     facts.pvpEnabled = pvpEnabled;
@@ -254,7 +255,11 @@ bool RecoverOwnedBot(Player* bot)
         inRange = corpse->IsWithinDistInMap(bot, CORPSE_RECLAIM_RADIUS, true);
     }
     if (storedHere)
+    {
         pathUsable = PathFirstStep(bot, stored.GetPositionX(), stored.GetPositionY(), stored.GetPositionZ(), ignored);
+        if (!pathUsable)
+            pathUsable = EvaluateLocalStep(bot, stored.GetPositionX(), stored.GetPositionY(), ignored);
+    }
 
     switch (ChooseRecovery(alive, ghost, storedHere, delayDone, inRange, pathUsable))
     {
@@ -339,6 +344,26 @@ Unit* SelectHostile(Player* bot, Player* leader, bool pvpEnabled)
 bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget);
 void TryLootQuestItems(Player* bot, Unit* target);
 
+void DebugDecision(Player const* bot, char const* state, char const* reason, Unit const* target)
+{
+    if (!sConfigMgr->GetBoolDefault("Playerbot.Debug"sv, false) || !bot)
+        return;
+    float corpseDistance = -1.0f;
+    if (bot->HasCorpse() && bot->GetCorpseLocation().GetMapId() == bot->GetMapId())
+        corpseDistance = bot->GetExactDist(bot->GetCorpseLocation());
+    uint32_t const entry = target && target->GetTypeId() == TYPEID_UNIT ? target->GetEntry() : 0;
+    uint32_t const level = target ? target->GetLevel() : 0;
+    std::string const line = Trinity::StringFormat(
+        "bot {} {} state={} reason={} target={} entry={} level={} ghost={} corpseDist={:.1f}",
+        bot->GetName(), bot->GetGUID().ToString(), state, reason ? reason : "",
+        target ? target->GetGUID().ToString() : "none", entry, level,
+        bot->HasPlayerFlag(PLAYER_FLAGS_GHOST), corpseDistance);
+    if (sLog->ShouldLog("playerbot", LOG_LEVEL_INFO))
+        TC_LOG_INFO("playerbot", "{}", line);
+    else
+        TC_LOG_INFO("server.worldserver", "playerbot {}", line);
+}
+
 void StepOneOwnedBot(bool pvpEnabled)
 {
     if (g_logins.empty())
@@ -354,10 +379,18 @@ void StepOneOwnedBot(bool pvpEnabled)
         cursor = (cursor + 1) % g_logins.size();
         Player* bot = live.session->GetPlayer();
         if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported())
+        {
+            if (bot)
+                DebugDecision(bot, "skip", bot->IsBeingTeleported() ? "teleporting" : "not-in-world", nullptr);
             continue;
+        }
         ++steps;
         if (RecoverOwnedBot(bot))
+        {
+            DebugDecision(bot, bot->HasPlayerFlag(PLAYER_FLAGS_GHOST) ? "ghost" : "dead",
+                bot->HasCorpse() ? "recovery" : "no-corpse-location", nullptr);
             continue;
+        }
 
         Player* leader = nullptr;
         if (Group* group = bot->GetGroup())
@@ -370,17 +403,25 @@ void StepOneOwnedBot(bool pvpEnabled)
         if (ShouldFollowLeader(leader != nullptr, leaderAlive, sameMap, bot->IsInCombat(), leaderDistance))
         {
             WalkLocalStep(bot, leader->GetPositionX(), leader->GetPositionY());
+            DebugDecision(bot, "follow", "leader", leader);
             continue;
         }
 
         Unit* questTarget = nullptr;
         if (ActOnStarterQuest(bot, pvpEnabled, questTarget))
+        {
+            DebugDecision(bot, "quest", "acted", questTarget);
             continue;
+        }
 
         Unit* target = questTarget ? questTarget : SelectHostile(bot, leader, pvpEnabled);
         if (!target)
+        {
+            DebugDecision(bot, "idle", "no-legal-target", nullptr);
             continue;
-        HostileUse const use = JudgeHostile(FactsFor(bot, target, pvpEnabled));
+        }
+        HostileFacts const facts = FactsFor(bot, target, pvpEnabled);
+        HostileUse const use = JudgeHostile(facts);
         if (use == HostileUse::Melee || use == HostileUse::Approach)
         {
             if (use == HostileUse::Melee)
@@ -389,12 +430,18 @@ void StepOneOwnedBot(bool pvpEnabled)
                 {
                     SpellCastResult const cast = bot->CastSpell(CastSpellTargetArg(target), spellId);
                     if (cast == SPELL_CAST_OK)
+                    {
+                        DebugDecision(bot, "spell", "cast", target);
                         continue;
+                    }
                 }
             }
             EngageHostile(bot, target);
             TryLootQuestItems(bot, target);
+            DebugDecision(bot, use == HostileUse::Melee ? "melee" : "chase", HostileRefuseReason(facts), target);
         }
+        else
+            DebugDecision(bot, "refused", HostileRefuseReason(facts), target);
     }
 }
 

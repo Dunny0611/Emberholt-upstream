@@ -33,6 +33,7 @@ struct HostileFacts
     bool creature = false;
     bool alive = false;
     bool validAttack = false;
+    bool factionHostile = false;
     bool civilian = false;
     bool critter = false;
     bool pet = false;
@@ -53,24 +54,51 @@ enum class HostileUse : uint8_t
 inline HostileUse JudgeHostile(HostileFacts const& facts)
 {
     // CIVILIAN is a template extra flag. Hostile starter beasts can carry it, so it is not a combat ban.
-    // IsValidAttackTarget is the combat rule. Critters, pets, and totems stay refused.
+    // A creature with unit level 0 still uses band level 1. Faction hostility counts when the
+    // reputation at-war gate inside IsValidAttackTarget has not been set for a clientless bot.
     (void)facts.civilian;
-    if (!facts.alive || !facts.validAttack || facts.gameMaster || facts.critter || facts.pet)
+    if (!facts.alive || facts.gameMaster || facts.critter || facts.pet)
         return HostileUse::Refuse;
     if (facts.player)
     {
-        if (!facts.pvpEnabled || facts.sameFaction)
+        if (!facts.pvpEnabled || facts.sameFaction || !facts.validAttack)
             return HostileUse::Refuse;
     }
-    else if (!facts.creature)
+    else if (!facts.creature || (!facts.validAttack && !facts.factionHostile))
         return HostileUse::Refuse;
-    if (facts.level == 0 || uint32_t(facts.level) > uint32_t(facts.botLevel) + LevelHeadroom)
+    uint8_t const bandLevel = facts.level == 0 && facts.creature ? uint8_t(1) : facts.level;
+    if (bandLevel == 0 || uint32_t(bandLevel) > uint32_t(facts.botLevel) + LevelHeadroom)
         return HostileUse::Refuse;
     if (facts.distance <= MeleeReachYards)
         return HostileUse::Melee;
     if (facts.distance <= AcquireYards)
         return HostileUse::Approach;
     return HostileUse::Refuse;
+}
+
+inline char const* HostileRefuseReason(HostileFacts const& facts)
+{
+    if (JudgeHostile(facts) != HostileUse::Refuse)
+        return "ok";
+    if (!facts.alive)
+        return "dead";
+    if (facts.gameMaster)
+        return "gm";
+    if (facts.critter)
+        return "critter";
+    if (facts.pet)
+        return "pet";
+    if (facts.player && !facts.pvpEnabled)
+        return "pvp-off";
+    if (facts.player && facts.sameFaction)
+        return "same-faction";
+    if (facts.player && !facts.validAttack)
+        return "player-not-attackable";
+    if (!facts.creature)
+        return "not-creature";
+    if (!facts.validAttack && !facts.factionHostile)
+        return "not-hostile";
+    return "level-or-range";
 }
 
 struct KnownSpellFacts

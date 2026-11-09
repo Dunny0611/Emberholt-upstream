@@ -32,6 +32,7 @@ using Playerbot::V2::ScreenPoolIds;
 using Playerbot::V2::StepInput;
 using Playerbot::V2::StepKind;
 using Playerbot::V2::HostileFacts;
+using Playerbot::V2::HostileRefuseReason;
 using Playerbot::V2::HostileUse;
 using Playerbot::V2::JudgeHostile;
 using Playerbot::V2::KnownSpellFacts;
@@ -362,7 +363,7 @@ TEST_CASE("Hostile targets are level-appropriate creatures, and players stay ref
     creature.level = 60;
     CHECK(JudgeHostile(creature) == HostileUse::Refuse);
     creature.level = 0;
-    CHECK(JudgeHostile(creature) == HostileUse::Refuse);
+    CHECK(JudgeHostile(creature) == HostileUse::Approach);
     creature.level = 1;
     creature.distance = 4.0f;
     creature.civilian = true;
@@ -377,6 +378,16 @@ TEST_CASE("Hostile targets are level-appropriate creatures, and players stay ref
     creature.critter = true;
     CHECK(JudgeHostile(creature) == HostileUse::Refuse);
     creature.critter = false;
+    creature.validAttack = false;
+    creature.factionHostile = true;
+    creature.level = 0;
+    CHECK(JudgeHostile(creature) == HostileUse::Melee);
+    CHECK(std::string_view(HostileRefuseReason(creature)) == "ok");
+    creature.factionHostile = false;
+    creature.level = 1;
+    CHECK(JudgeHostile(creature) == HostileUse::Refuse);
+    CHECK(std::string_view(HostileRefuseReason(creature)) == "not-hostile");
+    creature.validAttack = true;
     creature.gameMaster = true;
     CHECK(JudgeHostile(creature) == HostileUse::Refuse);
 

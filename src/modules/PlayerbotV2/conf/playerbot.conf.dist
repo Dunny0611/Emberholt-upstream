@@ -31,6 +31,10 @@ Playerbot.Account.HordeIds =
 # Attack an opposite-faction player only when this is 1. Default refuses every player.
 Playerbot.PvP = 0
 
+# 1 logs one decision line per bot tick: state, target, refuse reason, path, corpse, quest.
+# Also add to worldserver.conf: Logger.playerbot=3,Console Server
+Playerbot.Debug = 0
+
 # Persisted characters and marker rows per pool account, not the online cap.
 # Online count is Playerbot.Population.*. 25 online needs that cap plus enough
 # account ids that MaxCharacters times the account count can hold them.

@@ -37,11 +37,14 @@ public:
     void OnWorldInitialized() override
     {
         Playerbot::V2::PopulationConfig const config = ReadPopulation();
+        bool const debug = sConfigMgr->GetBoolDefault("Playerbot.Debug"sv, false);
+        if (debug)
+            sLog->SetLogLevel("playerbot", LOG_LEVEL_INFO, true);
         TC_LOG_INFO("server.loading",
-            "Playerbot V2 experimental port: enable={} killSwitch={} allianceCap={} hordeCap={}. "
+            "Playerbot V2 experimental port: enable={} killSwitch={} allianceCap={} hordeCap={} debug={}. "
             "Startup does not create or log in a character. .playerbot create, login, and logout stay refused while the gate is closed. "
-            "A logged-in owned bot may path, cast a known harmful spell, or attack a legal creature. Quest accept and turn-in are not linked.",
-            config.enable, config.killSwitch, config.allianceCap, config.hordeCap);
+            "Each world tick runs death recovery, then quest accept/objective/turn-in, then combat.",
+            config.enable, config.killSwitch, config.allianceCap, config.hordeCap, debug);
     }
 
     void OnUpdate(uint32 diff) override
