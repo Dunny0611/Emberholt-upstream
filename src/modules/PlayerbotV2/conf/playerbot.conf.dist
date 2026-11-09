@@ -1,0 +1,16 @@
+[playerbot]
+#
+# Experimental port. Defaults refuse every new bot.
+# Enable and KillSwitch must both be changed, and a faction cap must be above 0,
+# before the policy allows a creation. This build still does not place bots on a map.
+#
+
+# Master switch. 0 = the module creates nothing.
+Playerbot.Enable = 0
+
+# Second stop. 1 = refuse new bots even if Enable is 1.
+Playerbot.Population.KillSwitch = 1
+
+# Maximum new bots online for that faction. 0 = none.
+Playerbot.Population.Alliance = 0
+Playerbot.Population.Horde = 0

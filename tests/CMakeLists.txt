@@ -24,7 +24,8 @@ target_link_libraries(tests
 
 target_include_directories(tests
   PRIVATE
-    ${CMAKE_CURRENT_BINARY_DIR})
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_SOURCE_DIR}/src/modules/PlayerbotV2)
 
 catch_discover_tests(tests)
 

@@ -998,10 +998,12 @@ struct PacketCounter
 class TC_GAME_API WorldSession
 {
     public:
+        // isBot defaults false. Real logins do not pass it. A headless module session may pass true.
         WorldSession(uint32 id, std::string&& name, uint32 battlenetAccountId, std::string&& battlenetAccountEmail,
             std::shared_ptr<WorldSocket>&& sock, AccountTypes sec, uint8 expansion, time_t mute_time, std::string&& os, Minutes timezoneOffset,
-            uint32 build, ClientBuild::VariantId clientBuildVariant, LocaleConstant locale, uint32 recruiter, bool isARecruiter);
-        ~WorldSession();
+            uint32 build, ClientBuild::VariantId clientBuildVariant, LocaleConstant locale, uint32 recruiter, bool isARecruiter,
+            bool isBot = false);
+        virtual ~WorldSession();
 
         bool PlayerLoading() const { return !m_playerLoading.IsEmpty(); }
         bool PlayerLogout() const { return m_playerLogout; }
@@ -1011,7 +1013,8 @@ class TC_GAME_API WorldSession
 
         bool IsAddonRegistered(std::string_view prefix) const;
 
-        void SendPacket(WorldPacket const* packet, bool forced = false);
+        // Virtual so a headless bot session can drop packets. Real sessions use this implementation.
+        virtual void SendPacket(WorldPacket const* packet, bool forced = false);
 
         void SendNotification(char const* format, ...) ATTR_PRINTF(2, 3);
         void SendNotification(uint32 stringId, ...);
@@ -1051,6 +1054,9 @@ class TC_GAME_API WorldSession
         std::string const& GetOS() const { return _os; }
         uint32 GetClientBuild() const { return _clientBuild; }
         ClientBuild::VariantId const& GetClientBuildVariant() const { return _clientBuildVariant; }
+
+        // False for every socket login. True only when the constructor was passed isBot.
+        bool IsBot() const { return _isBot; }
 
         bool CanAccessAlliedRaces() const;
 
@@ -2061,6 +2067,7 @@ class TC_GAME_API WorldSession
         std::string _os;
         uint32 _clientBuild;
         ClientBuild::VariantId _clientBuildVariant;
+        bool _isBot;
 
         std::array<uint8, 32> _realmListSecret;
         std::unordered_map<uint32 /*realmAddress*/, uint8> _realmCharacterCounts;

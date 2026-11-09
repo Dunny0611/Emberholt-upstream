@@ -1,0 +1,32 @@
+Source pin
+  archive: wow-forever-source-0.1.33.zip
+  sha256:  8ed3810b3f1b04bdc049b705aaa38ace2311e5830c0f68b3ab8c0d493861c6e0
+  size:    52966583
+  license: GPL-2.0, the same license as this tree (COPYING)
+
+This directory is not a copy of that archive. The archive's PlayerbotV2 module
+does not compile against forever 550546617a. CreationPolicy.h records the
+level and population rules that replace the archive's GiveLevel(owner level)
+and level-10 world buckets. ClassicArmor.h, ClassicSpellValue.h, the
+handcrafted road graph, and handcrafted_road SQL are not imported.
+
+Public compile of the archive, g++ 13.3.0, against this tree's headers:
+
+  BotCharacterFactory.cpp includes Session/BotSession.h
+    error: BotSession destructor marked override, but WorldSession's destructor was not virtual
+    error: SendPacket marked override, but WorldSession::SendPacket was not virtual
+
+  Those two declarations are now virtual on this experimental branch, with
+  IsBot() defaulting to false. After that, g++ -fsyntax-only:
+
+    BotSession.h included from a probe: exit 0
+    BotCharacterFactory.cpp: exit 0 (the creation TU parses)
+    BotSession.cpp: fatal error: LoginQueryHolder.h: No such file or directory
+    BotPopulationManager.cpp: ‘class Group’ has no member named ‘ReorderMembers’
+    PlayerbotV2.cpp: fatal error: BotGroupRules.h: No such file or directory
+
+  LoginQueryHolder is private inside CharacterHandler.cpp. Lifting it is a
+  login-path rewrite and is not in this branch. ReorderMembers and
+  BotGroupRules.h are further core hooks, not copied. ClassicArmor.h,
+  ClassicSpellValue.h, and the road graph were not compiled. Core mmaps are
+  not regenerated 70862 data, so this module does not walk a bot.
