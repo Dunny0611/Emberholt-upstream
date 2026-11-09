@@ -33,7 +33,10 @@ enum class CreateRefusal : uint8_t
     InvalidName,
     UnknownAccount,
     AccountFull,
-    CreateFailed
+    CreateFailed,
+    PrivilegedAccount,
+    SharedPoolAccount,
+    WrongPoolFaction
 };
 
 struct NewCharacterRequest
@@ -58,6 +61,8 @@ struct PersistRequest
     PopulationConfig config;
     uint32_t alreadyOnline = 0;
     uint32_t maxOnAccount = 10;
+    BotFaction poolFaction = BotFaction::Unknown;
+    uint32_t otherFactionPoolAccount = 0;
     NewCharacterRequest character;
     std::string name;
 };

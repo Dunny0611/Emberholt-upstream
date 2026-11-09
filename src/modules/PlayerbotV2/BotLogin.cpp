@@ -8,14 +8,25 @@
  */
 
 #include "BotLogin.h"
+#include "LifecyclePolicy.h"
 #include "Session/BotSession.h"
 
 #include "AccountMgr.h"
+#include "DB2Structure.h"
 #include "DatabaseEnv.h"
+#include "Group.h"
+#include "GroupMgr.h"
 #include "Log.h"
+#include "MotionMaster.h"
+#include "ObjectAccessor.h"
+#include "PathGenerator.h"
+#include "Player.h"
+#include "RealmList.h"
 #include "WorldSession.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <vector>
 
 namespace Playerbot::V2
@@ -51,7 +62,119 @@ uint32_t OnlineCount(BotFaction faction)
     }));
 }
 
-void TickSessions(uint32_t diff)
+bool OwnedOnline(ObjectGuid character)
+{
+    return std::any_of(g_logins.begin(), g_logins.end(), [character](LiveLogin const& live)
+    {
+        Player* player = live.session->GetPlayer();
+        return player && player->GetGUID() == character;
+    });
+}
+
+void AcceptPendingInvites()
+{
+    for (LiveLogin const& live : g_logins)
+    {
+        Player* bot = live.session->GetPlayer();
+        if (!bot || !bot->IsInWorld())
+            continue;
+        Group* group = bot->GetGroupInvite();
+        if (!group)
+            continue;
+
+        Player* leader = ObjectAccessor::FindPlayer(group->GetLeaderGUID());
+        bool const leaderIsBot = leader && leader->GetSession() && leader->GetSession()->IsBot();
+        BotFaction const leaderFaction = leader ? FactionForStarterRace(leader->GetRace()) : BotFaction::Unknown;
+        if (!AcceptGroupInvite(true, leaderIsBot, live.faction, leaderFaction, false))
+        {
+            bot->UninviteFromGroup();
+            continue;
+        }
+
+        group->RemoveInvite(bot);
+        if (group->GetLeaderGUID() == bot->GetGUID() || group->IsFull())
+            continue;
+        if (!group->IsCreated())
+        {
+            if (!leader)
+            {
+                group->RemoveAllInvites();
+                continue;
+            }
+            group->RemoveInvite(leader);
+            group->Create(leader);
+            sGroupMgr->AddGroup(group);
+        }
+        if (group->AddMember(bot))
+            group->BroadcastGroupUpdate();
+    }
+}
+
+void StepOneOwnedBot()
+{
+    if (g_logins.empty())
+        return;
+    static std::size_t cursor = 0;
+    auto const started = std::chrono::steady_clock::now();
+    uint32_t steps = 0;
+    for (std::size_t n = 0; n < g_logins.size() && steps < AiStepsPerTick; ++n)
+    {
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count() >= AiBudgetMs)
+            break;
+        LiveLogin const& live = g_logins[cursor % g_logins.size()];
+        cursor = (cursor + 1) % g_logins.size();
+        Player* bot = live.session->GetPlayer();
+        if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported())
+            continue;
+
+        Unit* attacker = nullptr;
+        for (Unit* unit : bot->getAttackers())
+        {
+            if (unit && bot->GetDistance(unit) <= 5.0f)
+            {
+                attacker = unit;
+                break;
+            }
+        }
+
+        bool pathUsable = false;
+        PathGenerator path(bot);
+        if (!attacker && bot->GetMotionMaster()->GetCurrentMovementGeneratorType() == IDLE_MOTION_TYPE)
+        {
+            float const destX = bot->GetPositionX() + 8.0f * std::cos(bot->GetOrientation());
+            float const destY = bot->GetPositionY() + 8.0f * std::sin(bot->GetOrientation());
+            bool const calculated = path.CalculatePath(destX, destY, bot->GetPositionZ());
+            pathUsable = CorePathIsUsable(calculated, uint32_t(path.GetPathType())) && path.GetPath().size() >= 2;
+            if (pathUsable)
+            {
+                G3D::Vector3 const& point = path.GetPath()[1];
+                pathUsable = LocalStepPoint(point.x - bot->GetPositionX(), point.y - bot->GetPositionY(), point.z - bot->GetPositionZ());
+            }
+        }
+
+        switch (ChooseStep({ true, false, attacker != nullptr, pathUsable, steps }))
+        {
+            case StepKind::Melee:
+                if (attacker && bot->GetVictim() != attacker)
+                    bot->Attack(attacker, true);
+                ++steps;
+                break;
+            case StepKind::Path:
+            {
+                // MovePoint walks a spline to the next mmap point. It is not a teleport.
+                G3D::Vector3 const& point = path.GetPath()[1];
+                bot->GetMotionMaster()->MovePoint(1, point.x, point.y, point.z);
+                ++steps;
+                break;
+            }
+            case StepKind::Hold:
+            case StepKind::None:
+                break;
+        }
+    }
+}
+
+void TickSessions(uint32_t diff, bool gateClosed)
 {
     for (auto it = g_creates.begin(); it != g_creates.end();)
     {
@@ -63,6 +186,10 @@ void TickSessions(uint32_t diff)
             ++it;
     }
 
+    if (gateClosed)
+        for (LiveLogin const& live : g_logins)
+            live.session->KickPlayer("population gate closed");
+
     for (auto it = g_logins.begin(); it != g_logins.end();)
     {
         PacketFilter filter(it->session.get());
@@ -72,18 +199,49 @@ void TickSessions(uint32_t diff)
         else
             ++it;
     }
+
+    if (!gateClosed)
+    {
+        AcceptPendingInvites();
+        StepOneOwnedBot();
+    }
 }
 
-bool TryScheduleLogin(PopulationConfig const& config, BotFaction faction, uint32_t alreadyOnline, uint32_t accountId, ObjectGuid character, std::string& detail)
+bool LogoutOwned(ObjectGuid character, std::string& detail)
+{
+    for (LiveLogin const& live : g_logins)
+    {
+        Player* player = live.session->GetPlayer();
+        if (!player || player->GetGUID() != character)
+            continue;
+        live.session->KickPlayer("owned bot logout");
+        detail = "owned bot session will log out";
+        return true;
+    }
+    detail = "that character is not an owned bot session";
+    return false;
+}
+
+bool TryScheduleLogin(PopulationConfig const& config, BotFaction faction, uint32_t alreadyOnline, uint32_t accountId, ObjectGuid character, uint8_t level, std::string& detail)
 {
     if (!PopulationAllowsNewBot(config, faction, alreadyOnline))
     {
         detail = "population gate is closed";
         return false;
     }
+    if (level != NewBotLevel)
+    {
+        detail = "only a level-1 character is logged in";
+        return false;
+    }
     if (accountId == 0 || character.IsEmpty())
     {
         detail = "account or character guid is empty";
+        return false;
+    }
+    if (OwnedOnline(character))
+    {
+        detail = "that owned bot is already logging in or online";
         return false;
     }
 
@@ -98,6 +256,11 @@ bool TryScheduleLogin(PopulationConfig const& config, BotFaction faction, uint32
     if (!sAccountMgr->GetName(accountId, accountName))
     {
         detail = "pool account name was not found";
+        return false;
+    }
+    if (!PoolSecurityAllowed(sAccountMgr->GetSecurity(accountId, int32_t(sRealmList->GetCurrentRealmId().Realm))))
+    {
+        detail = "pool account is GM or admin; login refused";
         return false;
     }
 

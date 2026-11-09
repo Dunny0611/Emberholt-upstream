@@ -39,14 +39,15 @@ public:
         Playerbot::V2::PopulationConfig const config = ReadPopulation();
         TC_LOG_INFO("server.loading",
             "Playerbot V2 experimental port: enable={} killSwitch={} allianceCap={} hordeCap={}. "
-            "Startup does not create or log in a character. .playerbot create and .playerbot login are the only entry points, and both stay refused while the gate is closed. "
-            "Walking, questing, and dungeons are not started.",
+            "Startup does not create or log in a character. .playerbot create, login, and logout stay refused while the gate is closed. "
+            "A logged-in owned bot requests one local PathGenerator step and does not teleport. Quest AI is not linked.",
             config.enable, config.killSwitch, config.allianceCap, config.hordeCap);
     }
 
     void OnUpdate(uint32 diff) override
     {
-        Playerbot::V2::TickSessions(diff);
+        Playerbot::V2::PopulationConfig const config = ReadPopulation();
+        Playerbot::V2::TickSessions(diff, !config.enable || config.killSwitch);
     }
 };
 }

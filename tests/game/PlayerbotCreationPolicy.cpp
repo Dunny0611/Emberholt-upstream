@@ -12,9 +12,23 @@
 #include "BotLogin.h"
 #include "CharacterFactory.h"
 #include "CreationPolicy.h"
+#include "LifecyclePolicy.h"
 
+using Playerbot::V2::AcceptGroupInvite;
 using Playerbot::V2::AdmitPersistence;
+using Playerbot::V2::AiStepsPerTick;
 using Playerbot::V2::BotFaction;
+using Playerbot::V2::ChooseStep;
+using Playerbot::V2::ClassifyName;
+using Playerbot::V2::CorePathIsUsable;
+using Playerbot::V2::DropOwnedSession;
+using Playerbot::V2::LocalStepPoint;
+using Playerbot::V2::NameUse;
+using Playerbot::V2::PoolScreen;
+using Playerbot::V2::PoolSecurityAllowed;
+using Playerbot::V2::ScreenPoolIds;
+using Playerbot::V2::StepInput;
+using Playerbot::V2::StepKind;
 using Playerbot::V2::CreateRefusal;
 using Playerbot::V2::DecideNewCharacter;
 using Playerbot::V2::NewCharacterDecision;
@@ -160,7 +174,7 @@ TEST_CASE("A closed gate returns before a character insert or a login session", 
     CHECK(created.guid.IsEmpty());
 
     std::string detail;
-    CHECK_FALSE(TryScheduleLogin(defaults, BotFaction::Alliance, 0, 50, ObjectGuid::Empty, detail));
+    CHECK_FALSE(TryScheduleLogin(defaults, BotFaction::Alliance, 0, 50, ObjectGuid::Empty, 1, detail));
     CHECK(detail == "population gate is closed");
 }
 
@@ -181,3 +195,70 @@ TEST_CASE("Persistence admission does not require the navigation flag", "[Player
     CHECK_FALSE(MayEnterWorld(armed, BotFaction::Alliance, 0, false));
 }
 #endif
+
+TEST_CASE("Pool accounts stay dedicated, unprivileged, and faction-matched", "[PlayerbotCreation]")
+{
+    CHECK(ScreenPoolIds(0, 0, BotFaction::Alliance, BotFaction::Alliance) == PoolScreen::Missing);
+    CHECK(ScreenPoolIds(50, 50, BotFaction::Alliance, BotFaction::Alliance) == PoolScreen::Shared);
+    CHECK(ScreenPoolIds(50, 60, BotFaction::Horde, BotFaction::Alliance) == PoolScreen::WrongFaction);
+    CHECK(ScreenPoolIds(50, 60, BotFaction::Alliance, BotFaction::Alliance) == PoolScreen::Ok);
+    CHECK(PoolSecurityAllowed(0));
+    CHECK_FALSE(PoolSecurityAllowed(2));
+}
+
+TEST_CASE("A taken name is reused only for an owned level-1 marker row", "[PlayerbotCreation]")
+{
+    CHECK(ClassifyName(false, false, 1, 0, 50) == NameUse::Free);
+    CHECK(ClassifyName(true, true, 1, 50, 50) == NameUse::Reuse);
+    CHECK(ClassifyName(true, true, 60, 50, 50) == NameUse::Reject);
+    CHECK(ClassifyName(true, false, 1, 50, 50) == NameUse::Reject);
+    CHECK(ClassifyName(true, true, 1, 9, 50) == NameUse::Reject);
+}
+
+TEST_CASE("The kill switch and logout drop owned sessions only", "[PlayerbotCreation]")
+{
+    CHECK(DropOwnedSession(true, true));
+    CHECK_FALSE(DropOwnedSession(false, true));
+    CHECK_FALSE(DropOwnedSession(true, false));
+}
+
+TEST_CASE("A same-faction player invite is accepted and a bot or cross-faction invite is not", "[PlayerbotCreation]")
+{
+    CHECK(AcceptGroupInvite(true, false, BotFaction::Alliance, BotFaction::Alliance, false));
+    CHECK_FALSE(AcceptGroupInvite(true, true, BotFaction::Alliance, BotFaction::Alliance, false));
+    CHECK_FALSE(AcceptGroupInvite(true, false, BotFaction::Alliance, BotFaction::Horde, false));
+    CHECK_FALSE(AcceptGroupInvite(false, false, BotFaction::Alliance, BotFaction::Alliance, false));
+    CHECK_FALSE(AcceptGroupInvite(true, false, BotFaction::Horde, BotFaction::Horde, true));
+}
+
+TEST_CASE("Movement follows a core mmap path or a melee attacker and does not invent a shortcut", "[PlayerbotCreation]")
+{
+    CHECK(CorePathIsUsable(true, 0x01));
+    CHECK(CorePathIsUsable(true, 0x04));
+    CHECK_FALSE(CorePathIsUsable(true, 0x10));
+    CHECK_FALSE(CorePathIsUsable(true, 0x08));
+    CHECK_FALSE(CorePathIsUsable(true, 0x02));
+    CHECK_FALSE(CorePathIsUsable(true, 0x40));
+    CHECK_FALSE(CorePathIsUsable(true, 0x80));
+    CHECK_FALSE(CorePathIsUsable(false, 0x01));
+    CHECK(LocalStepPoint(3.0f, 4.0f, 1.0f));
+    CHECK_FALSE(LocalStepPoint(20.0f, 0.0f, 0.0f));
+    CHECK_FALSE(LocalStepPoint(0.0f, 0.0f, 9.0f));
+
+    StepInput input;
+    input.owned = true;
+    CHECK(ChooseStep(input) == StepKind::Hold);
+    input.attackerInMelee = true;
+    CHECK(ChooseStep(input) == StepKind::Melee);
+    input.attackerInMelee = false;
+    input.corePathUsable = true;
+    CHECK(ChooseStep(input) == StepKind::Path);
+    input.stepsAlreadyThisTick = AiStepsPerTick;
+    CHECK(ChooseStep(input) == StepKind::Hold);
+    input.stepsAlreadyThisTick = 0;
+    input.gateClosed = true;
+    CHECK(ChooseStep(input) == StepKind::None);
+    input.gateClosed = false;
+    input.owned = false;
+    CHECK(ChooseStep(input) == StepKind::None);
+}

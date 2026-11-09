@@ -15,12 +15,16 @@ Playerbot.Population.KillSwitch = 1
 Playerbot.Population.Alliance = 0
 Playerbot.Population.Horde = 0
 
-# Existing auth account ids that will own new characters. 0 refuses creation.
-# This build does not create auth accounts. Do not point these at an account
-# that already has player characters. Login also requires a row in
-# playerbot_v2_character, which is created with the character.
+# Existing player-security auth account ids. 0 refuses creation.
+# The two ids must be different. A GM, admin, or console account is refused.
+# This build does not create auth accounts and does not adopt an account that
+# lacks a playerbot_v2_character row. Login also requires that row and level 1.
 Playerbot.Account.Alliance = 0
 Playerbot.Account.Horde = 0
+
+# One PathGenerator step or one melee swing per world tick, 5ms budget.
+# A bad or missing path does not move the bot and does not teleport it.
+# Starter areas are used when a tile is actually present. Do not raise population here.
 
 # Characters kept on one pool account. Further creates are refused.
 Playerbot.Account.MaxCharacters = 10

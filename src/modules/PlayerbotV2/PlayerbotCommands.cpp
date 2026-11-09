@@ -54,7 +54,9 @@ bool HandleCreate(ChatHandler* handler, std::string const& name, uint8 race, uin
     PersistRequest request;
     request.config = config;
     request.alreadyOnline = OnlineCount(faction);
-    request.maxOnAccount = uint32_t(std::max(1, sConfigMgr->GetIntDefault("Playerbot.Account.MaxCharacters"sv, 10)));
+    request.maxOnAccount = uint32_t(std::max(0, sConfigMgr->GetIntDefault("Playerbot.Account.MaxCharacters"sv, 10)));
+    request.poolFaction = faction;
+    request.otherFactionPoolAccount = PoolAccount(faction == BotFaction::Alliance ? BotFaction::Horde : BotFaction::Alliance);
     request.character.poolAccountId = PoolAccount(faction);
     request.character.ownerAccountId = owner;
     request.character.race = race;
@@ -111,7 +113,7 @@ bool HandleLogin(ChatHandler* handler, std::string const& name)
     }
 
     std::string detail;
-    if (!TryScheduleLogin(config, faction, OnlineCount(faction), entry->AccountId, entry->Guid, detail))
+    if (!TryScheduleLogin(config, faction, OnlineCount(faction), entry->AccountId, entry->Guid, entry->Level, detail))
     {
         handler->PSendSysMessage("Playerbot login refused: %s", detail.c_str());
         handler->SetSentErrorMessage(true);
@@ -119,6 +121,34 @@ bool HandleLogin(ChatHandler* handler, std::string const& name)
     }
 
     handler->PSendSysMessage("Playerbot login submitted for %s. %s", normalized.c_str(), detail.c_str());
+    return true;
+}
+
+bool HandleLogout(ChatHandler* handler, std::string const& name)
+{
+    using namespace Playerbot::V2;
+    std::string normalized = name;
+    if (!normalizePlayerName(normalized))
+    {
+        handler->PSendSysMessage("Playerbot logout refused: name failed normalization");
+        handler->SetSentErrorMessage(true);
+        return false;
+    }
+    CharacterCacheEntry const* entry = sCharacterCache->GetCharacterCacheByName(normalized);
+    if (!entry)
+    {
+        handler->PSendSysMessage("Playerbot logout refused: %s is not in the character cache", normalized.c_str());
+        handler->SetSentErrorMessage(true);
+        return false;
+    }
+    std::string detail;
+    if (!LogoutOwned(entry->Guid, detail))
+    {
+        handler->PSendSysMessage("Playerbot logout refused: %s", detail.c_str());
+        handler->SetSentErrorMessage(true);
+        return false;
+    }
+    handler->PSendSysMessage("Playerbot logout: %s. %s", normalized.c_str(), detail.c_str());
     return true;
 }
 
@@ -133,6 +163,7 @@ public:
         {
             { "create", HandleCreate, rbac::RBAC_PERM_COMMAND_DEBUG, Console::Yes },
             { "login", HandleLogin, rbac::RBAC_PERM_COMMAND_DEBUG, Console::Yes },
+            { "logout", HandleLogout, rbac::RBAC_PERM_COMMAND_DEBUG, Console::Yes },
         };
         static ChatCommandTable table =
         {

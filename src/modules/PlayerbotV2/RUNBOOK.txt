@@ -1,0 +1,55 @@
+Playerbot V2 experimental runbook
+GPL-2.0, same license as this tree. Source pin: wow-forever-source-0.1.33.zip
+sha256 8ed3810b3f1b04bdc049b705aaa38ace2311e5830c0f68b3ab8c0d493861c6e0
+This module is not that archive. Ready pull request 1 is not this branch.
+
+Do not deploy. Do not copy the SQL into sql/custom. The worldserver updater
+applies that directory by itself.
+
+1. Config, all defaults refuse creation
+   Playerbot.Enable = 0
+   Playerbot.Population.KillSwitch = 1
+   Playerbot.Population.Alliance = 0
+   Playerbot.Population.Horde = 0
+   Playerbot.Account.Alliance = 0
+   Playerbot.Account.Horde = 0
+   Playerbot.Account.MaxCharacters = 10
+
+   The two account ids must already exist, must differ, and must be player
+   security. A GM, admin, or console account is refused. This build does not
+   create auth accounts.
+
+2. Character database, manual and only when a private validation database is intended
+   src/modules/PlayerbotV2/sql/playerbot_v2_character.sql
+   The factory inserts the new character and one marker row in the same
+   transaction. Login and logout require that marker. A character without it
+   is not loaded and is not kicked.
+
+3. Commands, after Enable=1, KillSwitch=0, and a faction cap above 0
+   .playerbot create <Name> <race> <class> <sex>
+   .playerbot login <Name>
+   .playerbot logout <Name>
+   Create saves level 1. A second create of the same owned level-1 name
+   returns the existing guid. Login refuses any other level. Logout and the
+   kill switch remove only sessions this module opened.
+
+4. Groups
+   An owned bot accepts a group invite from a non-bot player of the same
+   faction. A bot leader, a cross-faction leader, or a closed gate declines.
+   A group with no bot session keeps the core raid, tap, and loot rules.
+
+5. Movement
+   One owned bot per world tick may take one step. PathGenerator must return
+   a normal or incomplete path that is not a shortcut and not far from the
+   mesh, and the next point must be within 12 yards horizontally and 4 yards
+   vertically. Otherwise the bot stays put. There is no teleport, no capital
+   move, and no level boost. Starter areas are not assumed to lack tiles; a
+   tile is used only when PathGenerator accepts it.
+   One melee Attack is issued when an attacker is already within 5 yards.
+   Quest, dungeon, and archive BotAI are not linked. No walk was observed in
+   the cloud build, which does not have the private 70862 mmap tiles.
+
+6. Build used for the public check
+   g++ , RelWithDebInfo
+   -DSERVERS=1 -DTOOLS=0 -DSCRIPTS=static -DBUILD_TESTING=1 -DBUILD_PLAYERBOT_V2=1
+   The server was not started and no database was written.

@@ -30,16 +30,29 @@ Public compile of the archive, g++ 13.3.0, against this tree's headers:
   and does not call InitializeSession or look up a battlenet account.
 
   CharacterFactory.cpp calls Player::Create and SaveToDB for a new guid on
-  a caller-supplied pool account. The saved level is 1. GiveLevel is not
-  called. The character insert and the playerbot_v2_character marker share
-  one transaction. Startup does not call the factory. .playerbot create
-  and .playerbot login return before a session or a query while Enable is
-  0 or the kill switch is 1. Login loads a guid only when the marker row
-  matches the pool account, so an existing character is not loaded.
+  a caller-supplied player-security pool account. Alliance and horde ids
+  must differ. The saved level is 1, or the character is not saved.
+  GiveLevel is not called. The character insert and the
+  playerbot_v2_character marker share one transaction. A second create of
+  the same owned level-1 name returns the existing guid. Startup does not
+  call the factory. .playerbot create, login, and logout return before a
+  session or a query while Enable is 0 or the kill switch is 1. Login and
+  logout touch only a level-1 marker row this module opened. Closing the
+  gate kicks those sessions and no others.
+
+  Owned bots accept a same-faction non-bot group invite. One core
+  PathGenerator step or one melee Attack runs per tick. A path is followed
+  only when it is PATHFIND_NORMAL or PATHFIND_INCOMPLETE, is not a shortcut
+  or far from the mesh, and the next point is within 12 yards horizontally
+  and 4 yards vertically. Anything else leaves the bot where it stands.
+  There is no teleport, capital move, or level boost. Starter areas are not
+  treated as permanently unpathable; a tile is used when PathGenerator
+  accepts it. This cloud build has no 70862 mmaps, so no walk was observed.
+
+  Archive BotAI, the handcrafted road graph, ClassicArmor, and
+  ClassicSpellValue are not linked. Quest progress is not implemented.
 
   Group::IsRaidForQuests keeps isRaidGroup() when no member session is a
   bot. Tap sharing and round-robin loot use BotGroupRules and match the
-  previous walk in that case. ReorderMembers, BotPopulationManager,
-  ClassicArmor, ClassicSpellValue, and the road graph are not imported.
-  Core mmaps are not regenerated 70862 data, so this module does not walk
-  a bot.
+  previous walk in that case. ReorderMembers and BotPopulationManager are
+  not imported.

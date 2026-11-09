@@ -15,6 +15,7 @@
 
 #include "CharacterFactory.h"
 #include "BotLogin.h"
+#include "LifecyclePolicy.h"
 #include "Session/BotSession.h"
 
 #include "AccountMgr.h"
@@ -31,9 +32,33 @@
 #include "WorldSession.h"
 
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace Playerbot::V2
 {
+namespace
+{
+struct InflightCreate
+{
+    std::string name;
+    ObjectGuid guid;
+    uint32_t account = 0;
+};
+
+std::vector<InflightCreate> g_inflight;
+
+bool MarkerOwned(ObjectGuid guid, uint32_t account)
+{
+    QueryResult marker = CharacterDatabase.PQuery("SELECT account FROM playerbot_v2_character WHERE guid = {}", guid.GetCounter());
+    return marker && marker->Fetch()[0].GetUInt32() == account;
+}
+
+void ReleaseInflight(ObjectGuid guid)
+{
+    std::erase_if(g_inflight, [guid](InflightCreate const& row) { return row.guid == guid; });
+}
+}
 bool IsStarterClass(uint8_t classId)
 {
     switch (classId)
@@ -59,6 +84,18 @@ PersistResult PersistLevelOneCharacter(PersistRequest const& request)
     if (admission.refusal != CreateRefusal::None)
         return { admission.refusal, ObjectGuid::Empty, "population gate, account, faction, or level refused the character before any database call" };
 
+    switch (ScreenPoolIds(request.character.poolAccountId, request.otherFactionPoolAccount, admission.faction, request.poolFaction))
+    {
+        case PoolScreen::Missing:
+            return { CreateRefusal::MissingPoolAccount, ObjectGuid::Empty, "pool account is not configured" };
+        case PoolScreen::Shared:
+            return { CreateRefusal::SharedPoolAccount, ObjectGuid::Empty, "alliance and horde pool accounts must be different accounts" };
+        case PoolScreen::WrongFaction:
+            return { CreateRefusal::WrongPoolFaction, ObjectGuid::Empty, "race faction does not match the pool account faction" };
+        case PoolScreen::Ok:
+            break;
+    }
+
     if (!IsStarterClass(request.character.classId))
         return { CreateRefusal::InvalidClass, ObjectGuid::Empty, "only a classic starter class is created, at level 1" };
 
@@ -78,12 +115,33 @@ PersistResult PersistLevelOneCharacter(PersistRequest const& request)
     if (sObjectMgr->IsReservedName(normalized))
         return { CreateRefusal::InvalidName, ObjectGuid::Empty, "name is reserved" };
 
-    if (sCharacterCache->GetCharacterCacheByName(normalized))
-        return { CreateRefusal::InvalidName, ObjectGuid::Empty, "name is already used" };
+    for (InflightCreate const& row : g_inflight)
+        if (row.name == normalized && row.account == request.character.poolAccountId)
+            return { CreateRefusal::None, row.guid, "create already queued for this marker name" };
+
+    bool const nameTaken = sCharacterCache->GetCharacterCacheByName(normalized) != nullptr;
+    if (nameTaken)
+    {
+        CharacterCacheEntry const* entry = sCharacterCache->GetCharacterCacheByName(normalized);
+        bool const marker = entry && MarkerOwned(entry->Guid, request.character.poolAccountId);
+        switch (ClassifyName(true, marker, entry ? entry->Level : 0, entry ? entry->AccountId : 0, request.character.poolAccountId))
+        {
+            case NameUse::Reuse:
+                return { CreateRefusal::None, entry->Guid, "level-1 marker character already exists; no second row is inserted" };
+            case NameUse::Free:
+                break;
+            case NameUse::Reject:
+                return { CreateRefusal::InvalidName, ObjectGuid::Empty, "name belongs to a character this factory does not own" };
+        }
+    }
 
     std::string accountName;
     if (!sAccountMgr->GetName(request.character.poolAccountId, accountName))
         return { CreateRefusal::UnknownAccount, ObjectGuid::Empty, "pool account does not exist; this factory does not create accounts" };
+
+    uint32_t const security = sAccountMgr->GetSecurity(request.character.poolAccountId, int32_t(sRealmList->GetCurrentRealmId().Realm));
+    if (!PoolSecurityAllowed(security))
+        return { CreateRefusal::PrivilegedAccount, ObjectGuid::Empty, "pool account has GM or admin security; a player account is required" };
 
     uint32_t existing = 0;
     if (QueryResult count = CharacterDatabase.PQuery("SELECT COUNT(*) FROM characters WHERE account = {}", request.character.poolAccountId))
@@ -111,6 +169,8 @@ PersistResult PersistLevelOneCharacter(PersistRequest const& request)
 
     if (created->GetLevel() != NewBotLevel)
         created->SetLevel(NewBotLevel, false);
+    if (created->GetLevel() != NewBotLevel)
+        return { CreateRefusal::CreateFailed, ObjectGuid::Empty, "character could not be kept at level 1, so it was not saved" };
     created->SetAtLoginFlag(AT_LOGIN_FIRST);
 
     ObjectGuid const guid = created->GetGUID();
@@ -140,9 +200,13 @@ PersistResult PersistLevelOneCharacter(PersistRequest const& request)
                     created->GetName(), created->GetGUID().ToString(), uint32_t(created->GetLevel()), poolAccount);
             }
             else
+            {
+                ReleaseInflight(created->GetGUID());
                 TC_LOG_ERROR("entities.player.character", "Playerbot V2 character insert failed for {} on pool account {}", created->GetName(), poolAccount);
+            }
             *finished = true;
         });
+    g_inflight.push_back({ normalized, guid, poolAccount });
     HoldCreateSession(creationSession, finished);
 
     return { CreateRefusal::None, guid, "insert queued for a new level-1 character; login is a separate command and waits for the commit" };
