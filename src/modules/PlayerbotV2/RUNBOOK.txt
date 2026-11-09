@@ -51,23 +51,30 @@ applies that directory by itself.
    One owned bot, one action, 5ms budget. Playerbot.PvP defaults to 0.
    A target must be a living creature, not a critter, pet, totem, or game
    master, and its level must be at most the bot's level plus 4. Classic
-   starter beasts (Mottled Boar, Scorpid Worker, Rockjaw Trogg, Small Crag
-   Boar) use neutral faction templates, so template neutrality is enough.
-   Reputation reaction and IsValidAttackTarget are not the gate: those still
-   consult at-war and phase. Quest givers, vendors, and other service NPCs
-   stay refused, as do immune unit flags. The creature-template civilian
-   flag does not by itself refuse a target. Friendly guards stay refused:
-   Coldridge Mountaineer (853, Ironforge template 57) and Den Grunt (5952,
-   Orgrimmar template 85) are not-hostile on purpose. Playerbot.Debug logs
-   one sampled line per refused candidate, including the creature name and
-   whether the template is friendly, plus a reason histogram. Quest givers
-   log CanTakeQuest for each offered quest.
-   Held kill, object, and talk objectives are sought out to 120 yards, then
-   by the nearest spawn of that entry on the same map. A complete quest walks
-   to its ender. With nothing to walk to, legal prey is sought out to 80 yards.
-   If that giver has no new quest, other questgivers are checked out to 120
-   yards. Otherwise the bot walks nav-mesh steps inside a 150-yard leash of
-   its bind point. There is no teleport.
+   starter beasts (Mottled Boar faction 7, Scorpid Worker template 7, Small
+   Crag Boar faction 23, Ragged Young Wolf faction 29) have no reputation
+   row. Eligibility follows the client attack flags: NON_ATTACKABLE,
+   IMMUNE_TO_PC, and NOT_SELECTABLE must be clear, the NPC must not be a
+   service NPC, and the faction template must not be friendly. The creature
+   must be alive, in the same phase, in line of sight, and have a path.
+   IsHostileTo is not required. IsValidAttackTarget is called only after
+   SetAtWarForCombat, and only when that faction has a reputation row.
+   Capitals (47, 54, 68, 69, 72, 76, 81, 530) are never set at war.
+   Quest givers, vendors, and other service NPCs stay refused. The
+   creature-template civilian flag does not by itself refuse a target.
+   Friendly guards stay refused: Coldridge Mountaineer (853, Ironforge
+   template 57) and Den Grunt (5952, Orgrimmar template 85). Each refusal
+   logs the flag name, faction template id, and reputation state
+   (hasRep, atWar, peaceful, repFaction). The histogram names those
+   sub-reasons instead of folding them into other.
+   An incomplete kill, object, or talk objective is preferred out to 120
+   yards, then by the nearest spawn of that entry on the same map. While
+   that objective is open the bot does not walk back to a quest giver.
+   A complete quest walks to its ender. With nothing to walk to, legal prey
+   is sought out to 80 yards. An empty log, or a log with no seek objective,
+   checks other questgivers out to 120 yards. Otherwise the bot walks
+   nav-mesh steps inside a 150-yard leash of its bind point. Travel does
+   not teleport.
    The bot turns with SetInFront and swings only when IsWithinMeleeRange,
    in arc, and the attack timer is ready. A running timer is not reset.
    GetDistance already subtracts combat reach, so the stop check is
@@ -86,15 +93,20 @@ applies that directory by itself.
    or spell teach. A harmful spell is cast only when it is already in the
    spellbook, off cooldown, and in range. Otherwise the bot uses Attack.
    Death uses the core release-spirit and corpse-reclaim checks. A ghost
-   walks toward the stored corpse location on a valid path. A spirit healer
-   is not used.
+   with a corpse on this map walks toward it. A ghost with no corpse walks
+   to the spirit healer or the closest graveyard, then calls the healer
+   resurrect: ResurrectPlayer(0.5), 25% durability loss, SpawnCorpseBones.
+   Resurrection sickness is applied only above level 10. If the walk does
+   not arrive within 20 seconds the bot is teleported to that graveyard
+   and resurrected there.
 
 6. Starter quests, kill, gameobject, and talk
    The bot walks to a held kill, object, or talk objective out to 120 yards,
    or to the nearest spawn of that entry on the same map when the grid search
-   misses. It accepts a quest when CanTakeQuest and CanAddQuest both pass,
-   including questgivers found out to 120 yards after the current giver has
-   nothing new. Turn-in calls RewardQuest only when the status is complete,
+   misses. Once that objective is in the log it does not seek another giver.
+   It accepts a quest when CanTakeQuest and CanAddQuest both pass, including
+   questgivers found out to 120 yards when the log has no seek objective.
+   Turn-in calls RewardQuest only when the status is complete,
    the NPC is the involved giver, CanRewardQuest passes, and the quest has
    no reward choice. Talk-to objectives call TalkedToCreature only when that
    NPC is within interaction distance.

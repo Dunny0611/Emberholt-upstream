@@ -40,6 +40,7 @@ using Playerbot::V2::HostileFacts;
 using Playerbot::V2::HostileRefuseReason;
 using Playerbot::V2::HostileUse;
 using Playerbot::V2::ChoosePreyIndex;
+using Playerbot::V2::ClientCanAttack;
 using Playerbot::V2::ConsiderQuestGiver;
 using Playerbot::V2::MeleeTargetUnreachable;
 using Playerbot::V2::ChooseSwing;
@@ -69,7 +70,11 @@ using Playerbot::V2::QuestGiverHistogram;
 using Playerbot::V2::QuestOfferFacts;
 using Playerbot::V2::QuestOfferReason;
 using Playerbot::V2::RefuseHistogram;
-using Playerbot::V2::UnitFlagNotAttackable;
+using Playerbot::V2::ResurrectionSicknessApplies;
+using Playerbot::V2::ShouldFinishSpiritResurrect;
+using Playerbot::V2::UnitFlagImmuneToPc;
+using Playerbot::V2::UnitFlagNonAttackable;
+using Playerbot::V2::UnitFlagNotSelectable;
 using Playerbot::V2::KnownSpellFacts;
 using Playerbot::V2::HarmfulSpellReady;
 using Playerbot::V2::ShouldFollowLeader;
@@ -419,17 +424,12 @@ TEST_CASE("Hostile targets are level-appropriate creatures, and players stay ref
     creature.validAttack = false;
     creature.factionHostile = true;
     creature.level = 0;
-    CHECK(JudgeHostile(creature) == HostileUse::Refuse);
-    CHECK(std::string_view(HostileRefuseReason(creature)) == "not-valid-attack");
-    creature.validAttack = true;
     CHECK(JudgeHostile(creature) == HostileUse::Melee);
     CHECK(std::string_view(HostileRefuseReason(creature)) == "ok");
     creature.factionHostile = false;
     creature.level = 1;
-    creature.validAttack = false;
-    CHECK(JudgeHostile(creature) == HostileUse::Refuse);
-    CHECK(std::string_view(HostileRefuseReason(creature)) == "not-valid-attack");
-    creature.validAttack = true;
+    CHECK(JudgeHostile(creature) == HostileUse::Melee);
+    CHECK(std::string_view(HostileRefuseReason(creature)) == "ok");
     creature.gameMaster = true;
     CHECK(JudgeHostile(creature) == HostileUse::Refuse);
 
@@ -481,7 +481,12 @@ HostileFacts ClassicCreature(uint32_t entry, uint8_t level, uint32_t npcFlags, u
     facts.unitFlags = unitFlags;
     facts.civilian = civilian;
     facts.nonCombatService = (npcFlags & NpcFlagNonCombatService) != 0;
-    facts.immune = (unitFlags & UnitFlagNotAttackable) != 0;
+    facts.flagNonAttackable = (unitFlags & UnitFlagNonAttackable) != 0;
+    facts.flagImmuneToPc = (unitFlags & UnitFlagImmuneToPc) != 0;
+    facts.flagNotSelectable = (unitFlags & UnitFlagNotSelectable) != 0;
+    facts.immune = facts.flagNonAttackable || facts.flagImmuneToPc || facts.flagNotSelectable;
+    facts.samePhase = true;
+    facts.los = true;
     facts.validAttack = false;
     facts.factionHostile = false;
     facts.friendlyTo = true;
@@ -509,14 +514,8 @@ TEST_CASE("Classic starter beasts stay eligible when reaction and attack checks 
     HostileFacts rockjaw = ClassicCreature(707, 1, 0, 0, true, trogg, alliance);
     HostileFacts burly = ClassicCreature(724, 2, 0, 0, true, trogg, alliance);
     HostileFacts crag = ClassicCreature(708, 3, 0, 0, false, cragBoar, alliance);
-    CHECK(JudgeHostile(mottledBoar) == HostileUse::Refuse);
-    CHECK(std::string_view(HostileRefuseReason(mottledBoar)) == "not-valid-attack");
-    mottledBoar.validAttack = true;
-    mottledBoarMax.validAttack = true;
-    scorpid.validAttack = true;
-    rockjaw.validAttack = true;
-    burly.validAttack = true;
-    crag.validAttack = true;
+    CHECK(JudgeHostile(mottledBoar) == HostileUse::Approach);
+    CHECK_FALSE(NeedsSetAtWar(mottledBoar));
     HostileFacts const kaltunk = ClassicCreature(10176, 20, 2, 4864, true, orgrimmar, horde);
     HostileFacts const gornek = ClassicCreature(3143, 5, 3, 4864, true, orgrimmar, horde);
     HostileFacts const sten = ClassicCreature(658, 5, 3, 0, true, ironforge, alliance);
@@ -534,9 +533,9 @@ TEST_CASE("Classic starter beasts stay eligible when reaction and attack checks 
     CHECK(rockjaw.civilian);
 
     CHECK(JudgeHostile(kaltunk) == HostileUse::Refuse);
-    CHECK(std::string_view(HostileRefuseReason(kaltunk)) == "not-attackable");
+    CHECK(std::string_view(HostileRefuseReason(kaltunk)) == "flag-immune-to-pc");
     CHECK(JudgeHostile(gornek) == HostileUse::Refuse);
-    CHECK(std::string_view(HostileRefuseReason(gornek)) == "not-attackable");
+    CHECK(std::string_view(HostileRefuseReason(gornek)) == "flag-immune-to-pc");
     CHECK(JudgeHostile(sten) == HostileUse::Refuse);
     CHECK(std::string_view(HostileRefuseReason(sten)) == "civilian");
     CHECK(JudgeHostile(balir) == HostileUse::Refuse);
@@ -549,7 +548,7 @@ TEST_CASE("Classic starter beasts stay eligible when reaction and attack checks 
 
     HostileFacts friendlyAmbient = ClassicCreature(1, 1, 0, 0, false, ambient, horde);
     CHECK(JudgeHostile(friendlyAmbient) == HostileUse::Refuse);
-    CHECK(std::string_view(HostileRefuseReason(friendlyAmbient)) == "not-valid-attack");
+    CHECK(std::string_view(HostileRefuseReason(friendlyAmbient)) == "friendly-template");
 
     HostileFacts critter = mottledBoar;
     critter.critter = true;
@@ -605,7 +604,7 @@ TEST_CASE("Classic starter beasts stay eligible when reaction and attack checks 
     CHECK(refused == 4);
     CHECK(histogram.notHostile == 0);
     CHECK(histogram.civilian == 2);
-    CHECK(histogram.notAttackable == 2);
+    CHECK(histogram.flagImmuneToPc == 2);
     CHECK(FormatRefuseHistogram(histogram).find("not-hostile=0") != std::string::npos);
 
     QuestOfferFacts offer;
@@ -639,20 +638,17 @@ TEST_CASE("A wolf outside 30 yards is sought, and friendly guards stay refused",
     HostileFacts mountaineer = ClassicCreature(853, 55, 0, 4096, false, ironforgeGuard, alliance);
     mountaineer.distance = 8.0f;
     CHECK(JudgeHostile(mountaineer) == HostileUse::Refuse);
-    CHECK(std::string_view(HostileRefuseReason(mountaineer)) == "not-valid-attack");
+    CHECK(std::string_view(HostileRefuseReason(mountaineer)) == "friendly-template");
     CHECK(mountaineer.templateFriendly);
 
     HostileFacts denGrunt = ClassicCreature(5952, 55, 0, 36864, false, orgrimmarGuard, horde);
     denGrunt.distance = 8.0f;
     CHECK(JudgeHostile(denGrunt) == HostileUse::Refuse);
-    CHECK(std::string_view(HostileRefuseReason(denGrunt)) == "not-valid-attack");
+    CHECK(std::string_view(HostileRefuseReason(denGrunt)) == "friendly-template");
     CHECK(denGrunt.templateFriendly);
 
     HostileFacts wolf = ClassicCreature(705, 1, 0, 0, true, wolfFaction, alliance);
     wolf.distance = 47.0f;
-    CHECK(JudgeHostile(wolf) == HostileUse::Refuse);
-    CHECK(std::string_view(HostileRefuseReason(wolf)) == "not-valid-attack");
-    wolf.validAttack = true;
     CHECK(JudgeHostile(wolf) == HostileUse::Refuse);
     CHECK(std::string_view(HostileRefuseReason(wolf)) == "level-or-range");
     CHECK(JudgeHostile(wolf, PreySeekYards) == HostileUse::Approach);
@@ -855,4 +851,29 @@ TEST_CASE("Follow stays near the leader and death uses release, walk, or reclaim
     CHECK(ChooseRecovery(false, true, true, false, false, false) == RecoveryKind::Hold);
     CHECK(ChooseRecovery(false, true, true, true, true, false) == RecoveryKind::Reclaim);
     CHECK(ChooseRecovery(false, true, false, false, false, false) == RecoveryKind::SpiritHealer);
+    CHECK(ShouldFinishSpiritResurrect(true, 0));
+    CHECK_FALSE(ShouldFinishSpiritResurrect(false, 1000));
+    CHECK(ShouldFinishSpiritResurrect(false, 20000));
+    CHECK_FALSE(ResurrectionSicknessApplies(1));
+    CHECK_FALSE(ResurrectionSicknessApplies(10));
+    CHECK(ResurrectionSicknessApplies(11));
+
+    HostileFacts boarFaction = ClassicCreature(3098, 1, 0, 0, false, ClassicTemplate(189, 7, 1024, 0, 0, 0), ClassicTemplate(2, 2, 72, 5, 4, 10));
+    boarFaction.hasReputation = false;
+    boarFaction.reputationFaction = 7;
+    CHECK(ClientCanAttack(boarFaction));
+    CHECK_FALSE(NeedsSetAtWar(boarFaction));
+    CHECK(JudgeHostile(boarFaction) == HostileUse::Approach);
+
+    HostileFacts wolfFactionFacts = ClassicCreature(705, 1, 0, 0, false, ClassicTemplate(32, 29, 16, 0, 0, 0), ClassicTemplate(1, 1, 72, 3, 2, 12));
+    wolfFactionFacts.hasReputation = false;
+    wolfFactionFacts.reputationFaction = 29;
+    CHECK(ClientCanAttack(wolfFactionFacts));
+    CHECK_FALSE(NeedsSetAtWar(wolfFactionFacts));
+
+    HostileFacts cragFaction = ClassicCreature(708, 3, 0, 0, false, ClassicTemplate(1094, 23, 1024, 0, 0, 0), ClassicTemplate(1, 1, 72, 3, 2, 12));
+    cragFaction.hasReputation = false;
+    cragFaction.reputationFaction = 23;
+    CHECK(ClientCanAttack(cragFaction));
+    CHECK_FALSE(NeedsSetAtWar(cragFaction));
 }

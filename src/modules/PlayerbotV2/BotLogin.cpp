@@ -215,7 +215,13 @@ HostileFacts FactsFor(Player const* bot, Unit const* unit, bool pvpEnabled)
     facts.entry = unit->GetEntry();
     facts.unitFlags = UnitFlagBits(unit);
     facts.npcFlags = uint32_t(unit->GetNpcFlags());
-    facts.immune = (facts.unitFlags & UnitFlagNotAttackable) != 0;
+    facts.flagNonAttackable = (facts.unitFlags & UnitFlagNonAttackable) != 0;
+    facts.flagImmuneToPc = (facts.unitFlags & UnitFlagImmuneToPc) != 0;
+    facts.flagNotSelectable = (facts.unitFlags & UnitFlagNotSelectable) != 0;
+    facts.immune = facts.flagNonAttackable || facts.flagImmuneToPc || facts.flagNotSelectable;
+    facts.samePhase = bot->InSamePhase(unit);
+    facts.los = bot->IsWithinLOSInMap(unit);
+    facts.canSee = bot->CanSeeOrDetect(unit);
     facts.nonCombatService = (facts.npcFlags & NpcFlagNonCombatService) != 0;
     if (facts.player)
     {
@@ -235,7 +241,6 @@ HostileFacts FactsFor(Player const* bot, Unit const* unit, bool pvpEnabled)
         ApplyFactionRelation(facts, ReadTemplate(theirs), ReadTemplate(bot->GetFactionTemplateEntry()));
         if (facts.factionTemplate == 0)
             facts.factionTemplate = unit->GetFaction();
-        facts.canSee = bot->CanSeeOrDetect(unit);
         if (theirs)
         {
             facts.reputationFaction = theirs->Faction;
@@ -350,17 +355,21 @@ char const* AttackBlockReason(Player const* bot, Unit const* target)
     if (!target->IsAlive())
         return "dead";
     if (target->HasUnitFlag(UNIT_FLAG_NON_ATTACKABLE_2))
-        return "non-attackable-2";
-    if (target->IsUninteractible())
-        return "uninteractible";
+        return "flag-non-attackable-2";
+    if (target->IsUninteractible() || target->HasUnitFlag(UNIT_FLAG_UNINTERACTIBLE))
+        return "flag-not-selectable";
     if (bot->HasPlayerFlag(PLAYER_FLAGS_UBER))
         return "uber";
-    if (target->HasUnitFlag(UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_ON_TAXI | UNIT_FLAG_NOT_ATTACKABLE_1))
-        return "non-attackable";
+    if (target->HasUnitFlag(UNIT_FLAG_NON_ATTACKABLE))
+        return "flag-non-attackable";
+    if (target->HasUnitFlag(UNIT_FLAG_NOT_ATTACKABLE_1))
+        return "flag-not-attackable-1";
+    if (target->HasUnitFlag(UNIT_FLAG_ON_TAXI))
+        return "flag-on-taxi";
     if (bot->IsImmuneToNPC())
         return "immune-to-npc";
     if (target->IsImmuneToPC())
-        return "immune-to-pc";
+        return "flag-immune-to-pc";
     if (bot->IsFriendlyTo(target))
         return "friendly";
     if (target->IsFriendlyTo(bot))
@@ -476,14 +485,9 @@ void EngageHostile(Player* bot, Unit* target, MeleeTrace& trace)
     bot->SetInFront(target);
     trace.swing = SwingFor(bot, target);
     trace.los = bot->IsWithinLOSInMap(target);
-    trace.attackBlock = AttackBlockReason(bot, target);
+    TryMarkAtWar(bot, target);
     trace.validAttack = bot->IsValidAttackTarget(target);
-    if (!trace.validAttack)
-    {
-        TryMarkAtWar(bot, target);
-        trace.attackBlock = AttackBlockReason(bot, target);
-        trace.validAttack = bot->IsValidAttackTarget(target);
-    }
+    trace.attackBlock = AttackBlockReason(bot, target);
     SwingAction action = ChooseSwing(trace.swing);
     if (action == SwingAction::Close || !trace.los || !trace.validAttack)
         return;
@@ -627,11 +631,11 @@ void WritePlayerbotLine(std::string const& line)
         TC_LOG_INFO("server.worldserver", "playerbot {}", line);
 }
 
-void DebugRefuseCandidate(Player const* bot, Unit const* unit, HostileFacts const& facts)
+void DebugRefuseCandidate(Player const* bot, Unit const* unit, HostileFacts const& facts, char const* reasonOverride = nullptr)
 {
     if (!PlayerbotDebug() || !bot)
         return;
-    char const* const reason = HostileRefuseReason(facts);
+    char const* const reason = reasonOverride ? reasonOverride : HostileRefuseReason(facts);
     char const* note = "refused";
     if (reason && std::string_view(reason) == "not-hostile")
         note = (facts.templateFriendly || facts.friendlyTo) ? "friendly-template" : "not-prey";
@@ -639,10 +643,12 @@ void DebugRefuseCandidate(Player const* bot, Unit const* unit, HostileFacts cons
     if (!DebugDue(bot->GetGUID().GetCounter(), signature))
         return;
     WritePlayerbotLine(Trinity::StringFormat(
-        "bot {} {} refuse name=\"{}\" entry={} level={} faction={} unitFlags={} npcFlags={} alive={} reaction={} hostile={} friendly={} hostileFrom={} friendlyFrom={} templateFriendly={} dist={:.1f} reason={} note={}",
+        "bot {} {} refuse name=\"{}\" entry={} level={} faction={} repFaction={} hasRep={} atWar={} peaceful={} unitFlags={} npcFlags={} alive={} samePhase={} los={} reaction={} hostile={} friendly={} hostileFrom={} friendlyFrom={} templateFriendly={} dist={:.1f} reason={} note={}",
         bot->GetName(), bot->GetGUID().ToString(), unit ? unit->GetName() : std::string(), facts.entry, facts.level, facts.factionTemplate,
-        facts.unitFlags, facts.npcFlags, facts.alive ? 1 : 0, facts.reaction, facts.hostileTo ? 1 : 0, facts.friendlyTo ? 1 : 0,
-        facts.hostileFrom ? 1 : 0, facts.friendlyFrom ? 1 : 0, facts.templateFriendly ? 1 : 0, facts.distance, reason ? reason : "", note));
+        facts.reputationFaction, facts.hasReputation ? 1 : 0, facts.atWar ? 1 : 0, facts.peaceful ? 1 : 0,
+        facts.unitFlags, facts.npcFlags, facts.alive ? 1 : 0, facts.samePhase ? 1 : 0, facts.los ? 1 : 0, facts.reaction,
+        facts.hostileTo ? 1 : 0, facts.friendlyTo ? 1 : 0, facts.hostileFrom ? 1 : 0, facts.friendlyFrom ? 1 : 0,
+        facts.templateFriendly ? 1 : 0, facts.distance, reason ? reason : "", note));
 }
 
 void DebugQuestOffer(Player const* bot, HostileFacts const& facts, uint32_t questId, char const* reason, bool canTake, bool canAdd)
@@ -695,34 +701,91 @@ std::list<Creature*> CollectCreatures(Player* bot, float range, ScanStats& stats
     return creatures;
 }
 
+bool FinishSpiritResurrect(Player* bot)
+{
+    if (bot->RefuseHardcoreResurrect())
+        return false;
+    bot->ResurrectPlayer(0.5f, ResurrectionSicknessApplies(bot->GetLevel()));
+    bot->DurabilityLossAll(0.25f, true);
+    bot->SpawnCorpseBones();
+    bot->RemoveAurasDueToSpell(8326);
+    bot->RemovePlayerFlag(PLAYER_FLAGS_GHOST);
+    return bot->IsAlive() && !bot->HasPlayerFlag(PLAYER_FLAGS_GHOST);
+}
+
 bool ResurrectAtSpiritHealer(Player* bot)
 {
     if (bot->RefuseHardcoreResurrect() || bot->IsBeingTeleported())
         return true;
-    if (WorldSafeLocsEntry const* grave = sObjectMgr->GetClosestGraveyard(*bot, bot->GetTeam(), bot))
+
+    struct GhostWatch
     {
-        if (grave->Loc.GetMapId() == bot->GetMapId() && bot->GetExactDist(grave->Loc) > 8.0f)
-        {
-            WalkLocalStep(bot, grave->Loc.GetPositionX(), grave->Loc.GetPositionY());
-            return true;
-        }
+        uint32_t since = 0;
+        float x = 0.0f;
+        float y = 0.0f;
+    };
+    static std::unordered_map<uint64_t, GhostWatch> watches;
+    GhostWatch& watch = watches[bot->GetGUID().GetCounter()];
+    uint32_t const now = GameTime::GetGameTimeMS();
+    if (watch.since == 0)
+    {
+        watch.since = now;
+        watch.x = bot->GetPositionX();
+        watch.y = bot->GetPositionY();
     }
+    uint32_t const elapsed = now - watch.since;
+    bool near = false;
+    WorldSafeLocsEntry const* grave = sObjectMgr->GetClosestGraveyard(*bot, bot->GetTeam(), bot);
+    if (grave && grave->Loc.GetMapId() == bot->GetMapId() && bot->GetExactDist(grave->Loc) <= 8.0f)
+        near = true;
+
     ScanStats nearby;
+    Creature* healer = nullptr;
+    float healerDist = 30.0f;
     for (Creature* creature : CollectCreatures(bot, 30.0f, nearby))
     {
         if (!creature || !creature->HasNpcFlag(UNIT_NPC_FLAG_SPIRIT_HEALER))
             continue;
-        if (bot->GetDistance(creature) > INTERACTION_DISTANCE)
+        float const distance = bot->GetDistance(creature);
+        if (distance < healerDist)
         {
-            WalkLocalStep(bot, creature->GetPositionX(), creature->GetPositionY());
-            return true;
+            healer = creature;
+            healerDist = distance;
         }
-        bot->GetSession()->SendSpiritResurrect();
+    }
+    if (healer && healerDist <= INTERACTION_DISTANCE)
+        near = true;
+
+    if (ShouldFinishSpiritResurrect(near, elapsed))
+    {
+        char const* const reason = near ? "spirit-healer" : "spirit-healer-timeout";
+        if (!near && grave && grave->Loc.GetMapId() == bot->GetMapId())
+            bot->TeleportTo(grave->Loc);
+        bool const alive = FinishSpiritResurrect(bot);
+        watches.erase(bot->GetGUID().GetCounter());
+        if (PlayerbotDebug())
+            WritePlayerbotLine(Trinity::StringFormat(
+                "bot {} {} state=ghost reason={} alive={} ghost={} level={} sickness={}",
+                bot->GetName(), bot->GetGUID().ToString(), reason, alive ? 1 : 0,
+                bot->HasPlayerFlag(PLAYER_FLAGS_GHOST) ? 1 : 0, bot->GetLevel(),
+                ResurrectionSicknessApplies(bot->GetLevel()) ? 1 : 0));
         return true;
     }
-    // No spawned healer. SendSpiritResurrect is what the healer's activate handler calls:
-    // half health, normal resurrection sickness, 25% durability.
-    bot->GetSession()->SendSpiritResurrect();
+
+    float const movedX = bot->GetPositionX() - watch.x;
+    float const movedY = bot->GetPositionY() - watch.y;
+    if (elapsed > 4000 && movedX * movedX + movedY * movedY < 1.0f)
+        bot->GetMotionMaster()->Clear();
+    watch.x = bot->GetPositionX();
+    watch.y = bot->GetPositionY();
+
+    if (healer && healerDist > INTERACTION_DISTANCE)
+    {
+        WalkLocalStep(bot, healer->GetPositionX(), healer->GetPositionY());
+        return true;
+    }
+    if (grave && grave->Loc.GetMapId() == bot->GetMapId())
+        WalkLocalStep(bot, grave->Loc.GetPositionX(), grave->Loc.GetPositionY());
     return true;
 }
 
@@ -745,13 +808,26 @@ Unit* SelectHostile(Player* bot, Player* leader, bool pvpEnabled, ScanStats& sta
     {
         if (!creature || creature->GetGUID() == bot->GetGUID() || IsMeleeBlacklisted(bot, creature->GetGUID()))
             continue;
-        HostileFacts const facts = FactsFor(bot, creature, pvpEnabled);
+        HostileFacts facts = FactsFor(bot, creature, pvpEnabled);
         if (JudgeHostile(facts, PreySeekYards) == HostileUse::Refuse)
         {
             ++stats.refused;
             AccumulateRefuse(stats.reasons, HostileRefuseReason(facts));
             DebugRefuseCandidate(bot, creature, facts);
             continue;
+        }
+        if (facts.distance > MeleeReachYards)
+        {
+            G3D::Vector3 ignored;
+            facts.pathExists = PathFirstStep(bot, creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ(), ignored)
+                || EvaluateLocalStep(bot, creature->GetPositionX(), creature->GetPositionY(), ignored);
+            if (!facts.pathExists)
+            {
+                ++stats.refused;
+                AccumulateRefuse(stats.reasons, "no-path");
+                DebugRefuseCandidate(bot, creature, facts, "no-path");
+                continue;
+            }
         }
         ++stats.kept;
         if (facts.distance < nearestDist)
@@ -789,6 +865,29 @@ uint32_t HeldQuestCount(Player const* bot)
         if (bot->GetQuestSlotQuestId(slot))
             ++held;
     return held;
+}
+
+bool HasOpenSeekObjective(Player const* bot)
+{
+    for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+    {
+        uint32_t const questId = bot->GetQuestSlotQuestId(slot);
+        if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
+            continue;
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        if (!quest)
+            continue;
+        for (QuestObjective const& objective : quest->GetObjectives())
+        {
+            if (objective.ObjectID <= 0)
+                continue;
+            if (objective.Amount > 0 && bot->GetQuestObjectiveData(objective) >= objective.Amount)
+                continue;
+            if (ObjectiveNeedsSeek(objective.Type))
+                return true;
+        }
+    }
+    return false;
 }
 
 std::string QuestLogText(Player const* bot)
@@ -925,7 +1024,7 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
         }
 
         DebugQuestBranch(bot, SeekQuestBeforePrey(HeldQuestCount(bot)) ? "empty-log" : "have-log");
-        if (SeekQuestBeforePrey(HeldQuestCount(bot)) && DiscoverQuestOffer(bot, pvpEnabled))
+        if (!HasOpenSeekObjective(bot) && SeekQuestBeforePrey(HeldQuestCount(bot)) && DiscoverQuestOffer(bot, pvpEnabled))
         {
             DebugDecision(bot, "seek", "quest-offer", nullptr, nullptr);
             continue;
@@ -974,7 +1073,7 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
             DebugDecision(bot, "melee", HostileRefuseReason(facts), target, &scan, 0, &trace);
             continue;
         }
-        if (DiscoverQuestOffer(bot, pvpEnabled))
+        if (!HasOpenSeekObjective(bot) && DiscoverQuestOffer(bot, pvpEnabled))
         {
             DebugDecision(bot, "seek", "quest-offer", nullptr, &scan);
             continue;

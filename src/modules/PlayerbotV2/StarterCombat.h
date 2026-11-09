@@ -58,7 +58,12 @@ inline constexpr uint32_t NpcFlagNonCombatService =
     NpcFlagQuestGiver | 0x00000010u | 0x00000020u | 0x00000040u | 0x00000080u | 0x00000100u | 0x00000200u
     | 0x00000400u | 0x00000800u | 0x00001000u | 0x00002000u | 0x00004000u | 0x00008000u | 0x00010000u
     | 0x00020000u | 0x00040000u | 0x00080000u | 0x00200000u | 0x00400000u;
-inline constexpr uint32_t UnitFlagNotAttackable = 0x00000002u | 0x00000080u | 0x00000100u | 0x00010000u | 0x02000000u | 0x80000000u;
+// Client right-click attack cares about these three. The wider mask (full IMMUNE, NOT_ATTACKABLE_1)
+// was refusing live starter beasts that a player can still select and swing at.
+inline constexpr uint32_t UnitFlagNonAttackable = 0x00000002u;
+inline constexpr uint32_t UnitFlagImmuneToPc = 0x00000100u;
+inline constexpr uint32_t UnitFlagNotSelectable = 0x02000000u;
+inline constexpr uint32_t UnitFlagNotAttackable = UnitFlagNonAttackable | UnitFlagImmuneToPc | UnitFlagNotSelectable;
 
 inline bool TemplateIsFriendly(FactionTemplateFacts const& self, FactionTemplateFacts const& other)
 {
@@ -106,6 +111,12 @@ struct HostileFacts
     bool civilian = false;
     bool nonCombatService = false;
     bool immune = false;
+    bool flagNonAttackable = false;
+    bool flagImmuneToPc = false;
+    bool flagNotSelectable = false;
+    bool samePhase = true;
+    bool los = true;
+    bool pathExists = true;
     bool critter = false;
     bool pet = false;
     bool totem = false;
@@ -160,12 +171,55 @@ inline bool NeedsSetAtWar(HostileFacts const& facts)
         && facts.canSee && !facts.friendlyTo && !facts.friendlyFrom && !facts.templateFriendly;
 }
 
-// True when IsValidAttackTarget is already true, or it would be after the at-war flag above.
+// Client attack rules. IsHostileTo is not required. IsValidAttackTarget is applied later,
+// after at-war is set, and only when the faction actually has a reputation row.
+inline char const* ClientAttackBlock(HostileFacts const& facts)
+{
+    if (!facts.alive)
+        return "dead";
+    if (facts.gameMaster)
+        return "gm";
+    if (facts.critter)
+        return "critter";
+    if (facts.totem)
+        return "totem";
+    if (facts.pet)
+        return "pet";
+    if (facts.flagNonAttackable)
+        return "flag-non-attackable";
+    if (facts.flagImmuneToPc)
+        return "flag-immune-to-pc";
+    if (facts.flagNotSelectable)
+        return "flag-not-selectable";
+    if (facts.nonCombatService)
+        return "civilian";
+    if (facts.templateFriendly || facts.ownSide)
+        return "friendly-template";
+    if (facts.majorCity && facts.templateFriendly)
+        return "major-city";
+    if (facts.peaceful && facts.hasReputation)
+        return "peaceful";
+    if (!facts.samePhase)
+        return "phase";
+    if (facts.distance <= 15.0f && !facts.los)
+        return "no-los";
+    if (!facts.pathExists)
+        return "no-path";
+    return nullptr;
+}
+
+inline bool ClientCanAttack(HostileFacts const& facts)
+{
+    return ClientAttackBlock(facts) == nullptr;
+}
+
+// Swing gate. Eligibility is ClientCanAttack. Attack itself still waits until
+// IsValidAttackTarget is true, or until at-war can be set on a reputation row.
 inline bool AttackAllowed(HostileFacts const& facts)
 {
-    if (facts.validAttack)
-        return true;
-    return NeedsSetAtWar(facts);
+    if (!ClientCanAttack(facts))
+        return false;
+    return facts.validAttack || NeedsSetAtWar(facts);
 }
 
 // After NeedsSetAtWar is applied, the at-war gate inside IsValidAttackTarget is open.
@@ -202,7 +256,8 @@ enum class HostileUse : uint8_t
 inline HostileUse JudgeHostile(HostileFacts const& facts, float approachYards = AcquireYards)
 {
     // CIVILIAN (template extra flag 0x2) is not a combat ban. Rockjaw troggs carry it and are prey.
-    // Creatures must pass IsValidAttackTarget. A level of 0 still uses band level 1.
+    // Neutral templates are eligible without IsHostileTo. IsValidAttackTarget runs after at-war.
+    // A level of 0 still uses band level 1.
     (void)facts.civilian;
     if (!facts.alive || facts.gameMaster || facts.critter || facts.totem || facts.pet)
         return HostileUse::Refuse;
@@ -213,11 +268,7 @@ inline HostileUse JudgeHostile(HostileFacts const& facts, float approachYards = 
     }
     else if (!facts.creature)
         return HostileUse::Refuse;
-    else if (facts.immune)
-        return HostileUse::Refuse;
-    else if (facts.nonCombatService)
-        return HostileUse::Refuse;
-    else if (!AttackAllowed(facts))
+    else if (!ClientCanAttack(facts))
         return HostileUse::Refuse;
     uint8_t const bandLevel = facts.level == 0 && facts.creature ? uint8_t(1) : facts.level;
     if (bandLevel == 0 || uint32_t(bandLevel) > uint32_t(facts.botLevel) + LevelHeadroom)
@@ -322,12 +373,8 @@ inline char const* HostileRefuseReason(HostileFacts const& facts)
         return "player-not-attackable";
     if (!facts.creature)
         return "not-creature";
-    if (facts.immune)
-        return "not-attackable";
-    if (facts.nonCombatService)
-        return "civilian";
-    if (!AttackAllowed(facts))
-        return "not-valid-attack";
+    if (char const* const block = ClientAttackBlock(facts))
+        return block;
     return "level-or-range";
 }
 
@@ -342,6 +389,14 @@ struct RefuseHistogram
     uint32_t notAttackable = 0;
     uint32_t notHostile = 0;
     uint32_t levelOrRange = 0;
+    uint32_t flagNonAttackable = 0;
+    uint32_t flagImmuneToPc = 0;
+    uint32_t flagNotSelectable = 0;
+    uint32_t friendlyTemplate = 0;
+    uint32_t phase = 0;
+    uint32_t noLos = 0;
+    uint32_t noPath = 0;
+    uint32_t peaceful = 0;
     uint32_t other = 0;
 };
 
@@ -360,10 +415,26 @@ inline void AccumulateRefuse(RefuseHistogram& histogram, char const* reason)
         ++histogram.pet;
     else if (code == "civilian")
         ++histogram.civilian;
-    else if (code == "not-attackable")
+    else if (code == "not-attackable" || code == "flag-non-attackable")
+    {
         ++histogram.notAttackable;
-    else if (code == "not-hostile")
-        ++histogram.notHostile;
+        if (code == "flag-non-attackable")
+            ++histogram.flagNonAttackable;
+    }
+    else if (code == "flag-immune-to-pc")
+        ++histogram.flagImmuneToPc;
+    else if (code == "flag-not-selectable")
+        ++histogram.flagNotSelectable;
+    else if (code == "friendly-template" || code == "major-city" || code == "not-hostile")
+        ++histogram.friendlyTemplate;
+    else if (code == "phase")
+        ++histogram.phase;
+    else if (code == "no-los")
+        ++histogram.noLos;
+    else if (code == "no-path")
+        ++histogram.noPath;
+    else if (code == "peaceful")
+        ++histogram.peaceful;
     else if (code == "level-or-range")
         ++histogram.levelOrRange;
     else
@@ -381,7 +452,27 @@ inline std::string FormatRefuseHistogram(RefuseHistogram const& histogram)
         + " not-attackable=" + std::to_string(histogram.notAttackable)
         + " not-hostile=" + std::to_string(histogram.notHostile)
         + " level-or-range=" + std::to_string(histogram.levelOrRange)
+        + " flag-non-attackable=" + std::to_string(histogram.flagNonAttackable)
+        + " flag-immune-to-pc=" + std::to_string(histogram.flagImmuneToPc)
+        + " flag-not-selectable=" + std::to_string(histogram.flagNotSelectable)
+        + " friendly-template=" + std::to_string(histogram.friendlyTemplate)
+        + " phase=" + std::to_string(histogram.phase)
+        + " no-los=" + std::to_string(histogram.noLos)
+        + " no-path=" + std::to_string(histogram.noPath)
+        + " peaceful=" + std::to_string(histogram.peaceful)
         + " other=" + std::to_string(histogram.other);
+}
+
+inline constexpr uint32_t SpiritHealerTimeoutMs = 20000;
+
+inline bool ShouldFinishSpiritResurrect(bool nearGraveOrHealer, uint32_t elapsedMs)
+{
+    return nearGraveOrHealer || elapsedMs >= SpiritHealerTimeoutMs;
+}
+
+inline bool ResurrectionSicknessApplies(uint8_t level)
+{
+    return level > 10;
 }
 
 struct KnownSpellFacts
