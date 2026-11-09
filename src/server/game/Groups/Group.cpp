@@ -16,6 +16,15 @@
  */
 
 #include "Group.h"
+#include "BotGroupRules.h"
+
+namespace
+{
+bool MemberSessionIsBot(Player const* player)
+{
+    return player && player->GetSession() && player->GetSession()->IsBot();
+}
+}
 #include "Battleground.h"
 #include "BattlegroundMgr.h"
 #include "CharacterCache.h"
@@ -1133,51 +1142,32 @@ void Group::UpdateLooterGuid(WorldObject* pLootedObject, bool ifneed)
     if (GetLootMethod() == FREE_FOR_ALL)
         return;
 
+    // With no bot in range this is the same walk: keep the current looter when ifneed says so,
+    // otherwise take the next in-range member and wrap. A player in range keeps the turn from a bot.
     ObjectGuid oldLooterGUID = GetLooterGuid();
-    member_citerator guid_itr = _getMemberCSlot(oldLooterGUID);
-    if (guid_itr != m_memberSlots.end())
+    std::vector<ObjectGuid> memberGuids;
+    std::vector<BotGroupRules::LooterCandidate> candidates;
+    std::size_t current = m_memberSlots.size();
+    for (MemberSlot const& slot : m_memberSlots)
     {
-        if (ifneed)
+        if (slot.guid == oldLooterGUID)
+            current = memberGuids.size();
+
+        BotGroupRules::LooterCandidate& candidate = candidates.emplace_back();
+        if (Player* player = ObjectAccessor::FindPlayer(slot.guid))
         {
-            // not update if only update if need and ok
-            Player* looter = ObjectAccessor::FindPlayer(guid_itr->guid);
-            if (looter && looter->IsAtGroupRewardDistance(pLootedObject))
-                return;
+            candidate.inRange = player->IsAtGroupRewardDistance(pLootedObject);
+            candidate.bot = MemberSessionIsBot(player);
         }
-        ++guid_itr;
+        memberGuids.push_back(slot.guid);
     }
 
-    // search next after current
-    Player* pNewLooter = nullptr;
-    for (member_citerator itr = guid_itr; itr != m_memberSlots.end(); ++itr)
+    std::size_t const next = BotGroupRules::NextRoundRobinLooter(candidates, current, ifneed);
+    if (next < memberGuids.size())
     {
-        if (Player* player = ObjectAccessor::FindPlayer(itr->guid))
-            if (player->IsAtGroupRewardDistance(pLootedObject))
-            {
-                pNewLooter = player;
-                break;
-            }
-    }
-
-    if (!pNewLooter)
-    {
-        // search from start
-        for (member_citerator itr = m_memberSlots.begin(); itr != guid_itr; ++itr)
+        if (oldLooterGUID != memberGuids[next])
         {
-            if (Player* player = ObjectAccessor::FindPlayer(itr->guid))
-                if (player->IsAtGroupRewardDistance(pLootedObject))
-                {
-                    pNewLooter = player;
-                    break;
-                }
-        }
-    }
-
-    if (pNewLooter)
-    {
-        if (oldLooterGUID != pNewLooter->GetGUID())
-        {
-            SetLooterGuid(pNewLooter->GetGUID());
+            SetLooterGuid(memberGuids[next]);
             SendUpdate();
         }
     }
@@ -1617,6 +1607,28 @@ bool Group::isLFGGroup() const
 bool Group::isRaidGroup() const
 {
     return (m_groupFlags & GROUP_FLAG_RAID) != 0;
+}
+
+bool Group::HasBotMember() const
+{
+    for (GroupReference const& itr : GetMembers())
+        if (MemberSessionIsBot(itr.GetSource()))
+            return true;
+    return false;
+}
+
+bool Group::IsRaidForQuests() const
+{
+    // Real raids, including a raid of five or fewer, stay on isRaidGroup().
+    // v0.1.33 applied the size rule to every raid. This port does not.
+    if (!HasBotMember())
+        return isRaidGroup();
+
+    std::size_t players = 0;
+    for (GroupReference const& itr : GetMembers())
+        if (!MemberSessionIsBot(itr.GetSource()))
+            ++players;
+    return BotGroupRules::QuestRaidRuleApplies(isRaidGroup(), players, MAX_GROUP_SIZE);
 }
 
 bool Group::isBGGroup() const

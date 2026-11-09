@@ -679,6 +679,23 @@ void ReputationMgr::SetVisible(FactionState* faction)
     SendVisible(faction);
 }
 
+void ReputationMgr::SetAtWarForCombat(FactionEntry const* factionEntry)
+{
+    if (!factionEntry || !factionEntry->CanHaveReputation())
+        return;
+
+    FactionStateList::iterator itr = _factions.find(factionEntry->ReputationIndex);
+    if (itr == _factions.end())
+        return;
+
+    if (itr->second.Flags.HasFlag(ReputationFlags::AtWar))
+        return;
+
+    itr->second.Flags |= ReputationFlags::AtWar;
+    itr->second.needSend = true;
+    itr->second.needSave = true;
+}
+
 void ReputationMgr::SetAtWar(RepListID repListID, bool on)
 {
     FactionStateList::iterator itr = _factions.find(repListID);

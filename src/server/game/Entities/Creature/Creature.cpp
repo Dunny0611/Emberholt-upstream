@@ -31,6 +31,7 @@
 #include "GameTime.h"
 #include "GridNotifiersImpl.h"
 #include "Group.h"
+#include "BotGroupRules.h"
 #include "ItemTemplate.h"
 #include "Log.h"
 #include "Loot.h"
@@ -1393,10 +1394,18 @@ void Creature::SetTappedBy(Unit const* unit, bool withGroup)
 
     m_tapList.insert(player->GetGUID());
     if (withGroup)
+    {
         if (Group const* group = player->GetGroup())
+        {
+            bool const groupHasBot = group->HasBotMember();
             for (GroupReference const& itr : group->GetMembers())
-                if (GetMap()->IsRaid() || group->SameSubGroup(player, itr.GetSource()))
+            {
+                bool const memberIsBot = itr.GetSource()->GetSession() && itr.GetSource()->GetSession()->IsBot();
+                if (BotGroupRules::SharesTap(GetMap()->IsRaid(), group->SameSubGroup(player, itr.GetSource()), groupHasBot, memberIsBot))
                     m_tapList.insert(itr.GetSource()->GetGUID());
+            }
+        }
+    }
 
     if (m_tapList.size() >= CREATURE_TAPPERS_SOFT_CAP)
         SetDynamicFlag(UNIT_DYNFLAG_TAPPED);

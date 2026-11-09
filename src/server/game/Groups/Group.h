@@ -301,6 +301,11 @@ class TC_GAME_API Group
         bool IsFull() const;
         bool isLFGGroup()  const;
         bool isRaidGroup() const;
+        // True when a member session was constructed as a bot. A missing session is not a bot.
+        bool HasBotMember() const;
+        // A group with no bot session keeps isRaidGroup(). A group that has one counts only
+        // real members against the party size, so bot fillers do not turn a party into a raid quest.
+        bool IsRaidForQuests() const;
         bool isBGGroup()   const;
         bool isBFGroup()   const;
         bool IsCreated()   const;

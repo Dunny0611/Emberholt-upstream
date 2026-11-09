@@ -1,0 +1,71 @@
+Source pin
+  archive: wow-forever-source-0.1.33.zip
+  sha256:  8ed3810b3f1b04bdc049b705aaa38ace2311e5830c0f68b3ab8c0d493861c6e0
+  size:    52966583
+  license: GPL-2.0, the same license as this tree (COPYING)
+
+This directory is not a copy of that archive. The archive's PlayerbotV2 module
+does not compile against forever 550546617a. CreationPolicy.h records the
+level and population rules that replace the archive's GiveLevel(owner level)
+and level-10 world buckets. ClassicArmor.h, ClassicSpellValue.h, the
+handcrafted road graph, and handcrafted_road SQL are not imported.
+
+Public compile of the archive, g++ 13.3.0, against this tree's headers:
+
+  BotCharacterFactory.cpp includes Session/BotSession.h
+    error: BotSession destructor marked override, but WorldSession's destructor was not virtual
+    error: SendPacket marked override, but WorldSession::SendPacket was not virtual
+
+  Those two declarations are now virtual on this experimental branch, with
+  IsBot() defaulting to false. After that, g++ -fsyntax-only:
+
+    BotSession.h included from a probe: exit 0
+    BotCharacterFactory.cpp: exit 0 (the creation TU parses)
+    BotSession.cpp: fatal error: LoginQueryHolder.h: No such file or directory
+    BotPopulationManager.cpp: ‘class Group’ has no member named ‘ReorderMembers’
+    PlayerbotV2.cpp: fatal error: BotGroupRules.h: No such file or directory
+
+  LoginQueryHolder now has a public header. Initialize() stays in
+  CharacterHandler.cpp. BotSession drops packets, can submit that holder,
+  and does not call InitializeSession or look up a battlenet account.
+
+  CharacterFactory.cpp calls Player::Create and SaveToDB for a new guid on
+  a caller-supplied player-security pool account. Alliance and horde ids
+  must differ. The saved level is 1, or the character is not saved.
+  GiveLevel is not called. The character insert and the
+  playerbot_v2_character marker share one transaction. A second create of
+  the same owned level-1 name returns the existing guid. Startup does not
+  call the factory. .playerbot create, login, and logout return before a
+  session or a query while Enable is 0 or the kill switch is 1. Login and
+  logout touch only a level-1 marker row this module opened. Closing the
+  gate kicks those sessions and no others.
+
+  Owned bots accept a same-faction non-bot group invite. One action per
+  tick may follow a usable local PathGenerator step, cast one harmful spell
+  the character already knows, or Attack.   Targets are living legal creatures
+  within four levels. The civilian template flag is not a combat ban.
+  Critters, pets, totems, game masters, and same-faction players are refused.
+  An opposite-faction player is eligible only when Playerbot.PvP is 1.
+  The bot faces the target, chases into melee, and swings on the normal timer. A group follows its leader between 8 and 40 yards and
+  prefers the leader's victim when that victim passes the same checks.
+  Death uses the core release-spirit and corpse-reclaim checks. A ghost
+  without a usable path waits. There is no travel teleport, experience
+  grant, or spell teach.
+
+  New characters are saved at level 1 with a marker of guid, account,
+  faction, factory version, and start level. Login allows a later level
+  inside the core max. It does not reset level. A marker that fails the
+  account, faction, version, or start-level bind is not loaded. A name
+  used by any other character is not reused. MaxCharacters counts persisted
+  character rows and marker rows. The online cap is separate.
+
+  Starter quests use CanTakeQuest, AddQuest, objective entries, GameObject::Use,
+  and RewardQuest. Only monster and gameobject objectives are acted on.
+  Other objective types are refused. A reward choice is not selected.
+  Dungeon scripts are not implemented. This cloud build has no 70862 mmaps,
+  so no walk, kill, or turn-in was observed.
+
+  Group::IsRaidForQuests keeps isRaidGroup() when no member session is a
+  bot. Tap sharing and round-robin loot use BotGroupRules and match the
+  previous walk in that case. ReorderMembers and BotPopulationManager are
+  not imported.

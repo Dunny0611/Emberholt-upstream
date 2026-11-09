@@ -1,0 +1,157 @@
+Playerbot V2 experimental runbook
+GPL-2.0, same license as this tree. Source pin: wow-forever-source-0.1.33.zip
+sha256 8ed3810b3f1b04bdc049b705aaa38ace2311e5830c0f68b3ab8c0d493861c6e0
+This module is not that archive. Ready pull request 1 is not this branch.
+
+Do not deploy. Do not copy the SQL into sql/custom. The worldserver updater
+applies that directory by itself.
+
+1. Config, all defaults refuse creation
+   Playerbot.Enable = 0
+   Playerbot.Population.KillSwitch = 1
+   Playerbot.Population.Alliance = 0
+   Playerbot.Population.Horde = 0
+   Playerbot.Account.Alliance = 0
+   Playerbot.Account.Horde = 0
+   Playerbot.Account.MaxCharacters = 10
+   Playerbot.PvP = 0
+   Playerbot.Debug = 0
+   # worldserver.conf: Logger.playerbot=3,Console Server
+
+   The two account ids must already exist, must differ, and must be player
+   security. A GM, admin, or console account is refused. This build does not
+   create auth accounts.
+
+2. Character database, manual and only when a private validation database is intended
+   src/modules/PlayerbotV2/sql/playerbot_v2_character.sql
+   The factory inserts the new character and one marker row in the same
+   transaction. Login and logout require that marker. A character without it
+   is not loaded and is not kicked.
+
+3. Commands, after Enable=1, KillSwitch=0, and a faction cap above 0
+   .playerbot create <Name> <race> <class> <sex>
+   .playerbot login <Name>
+   .playerbot logout <Name>
+   Create saves a new character at level 1 and writes guid, account, faction,
+   factory version, and start level in the same transaction. A later login
+   keeps whatever level that character has earned, from 1 through the core
+   max level. The marker is not a level lock and login does not reset it.
+   A name already used by any other character is refused. Logout and the
+   kill switch remove only sessions this module opened.
+   Playerbot.Population.* is how many of that faction may be online.
+   Playerbot.Account.MaxCharacters counts persisted character rows and
+   factory marker rows on that pool account. Either count fills the cap.
+
+4. Groups
+   An owned bot accepts a group invite from a non-bot player of the same
+   faction. A bot leader, a cross-faction leader, or a closed gate declines.
+   A group with no bot session keeps the core raid, tap, and loot rules.
+
+5. Combat and movement
+   One owned bot, one action, 5ms budget. Playerbot.PvP defaults to 0.
+   A target must be a living creature, not a critter, pet, totem, or game
+   master, and its level must be at most the bot's level plus 4. Classic
+   starter beasts (Mottled Boar faction 7, Scorpid Worker template 7, Small
+   Crag Boar faction 23, Ragged Young Wolf faction 29) have no reputation
+   row. Eligibility follows the client attack flags: NON_ATTACKABLE,
+   IMMUNE_TO_PC, and NOT_SELECTABLE must be clear, the NPC must not be a
+   service NPC, and the faction template must not be friendly. The creature
+   must be alive, in the same phase, in line of sight, and have a path.
+   IsHostileTo is not required. IsValidAttackTarget is called only after
+   SetAtWarForCombat, and only when that faction has a reputation row.
+   A clientless bot never sends MOVE_INIT_ACTIVE_MOVER_COMPLETE, so
+   Player::CanNeverSee stays true until the bot sets
+   PLAYER_LOCAL_FLAG_OVERRIDE_TRANSPORT_SERVER_TIME. That flag is set
+   after login and after every teleport. m_seer is the bot itself, and
+   UpdateVisibilityForPlayer runs once the flag is set. A missing see
+   check is logged as its sub-reason (transport-server-time, phase,
+   ghost-visibility, sight-range, and the rest), not as cannot-see.
+   TeleportTo is finished on the server: a far teleport calls
+   HandleMoveWorldportAck and a near teleport applies the destination
+   the way HandleMoveTeleportAck does. The line is state=teleport
+   reason=ack-complete.
+   Capitals (47, 54, 68, 69, 72, 76, 81, 530) are never set at war.
+   Quest givers, vendors, and other service NPCs stay refused. The
+   creature-template civilian flag does not by itself refuse a target.
+   Friendly guards stay refused: Coldridge Mountaineer (853, Ironforge
+   template 57) and Den Grunt (5952, Orgrimmar template 85). Each refusal
+   logs the flag name, faction template id, and reputation state
+   (hasRep, atWar, peaceful, repFaction). The histogram names those
+   sub-reasons instead of folding them into other.
+   An incomplete kill, object, or talk objective is preferred out to 120
+   yards, then by the nearest spawn of that entry on the same map. While
+   that objective is open the bot does not walk back to a quest giver.
+   A plan target ignores the 150-yard wander leash. The leash center moves
+   to that hub, so the bot is not pulled back to the starter bind. A path
+   longer than 45 yards is walked in segments. Three path failures, or the
+   same quest action repeating with no movement, puts that quest on a
+   three-minute cooldown and the bot moves on. More than 8 bots within 40
+   yards of a prey target are sent to another cluster. Logins start one at
+   a time, 750ms apart. Race 0 on create rotates the faction's starter races.
+   New characters get a first name and a surname. The surname is stored in
+   characters.surname and the character cache, the same place a player
+   create writes it. Both parts use the character-name and reserved-name checks.
+   A completed quest is turned in before any new giver is sought. The ender
+   comes from creature_questender or gameobject_questender. The path uses
+   the ender's position, including a cave floor. A partial path walks to the
+   closest reachable point that is still inside gossip range (combat reach
+   plus 4 yards, the same check as GetNPCIfCanInteractWith). Reward choices
+   pick the class armor match, else the first usable item, else index 0.
+   Money and XP rewards use choice 0. The rewarded line is
+   state=turn-in reason=rewarded. The same NPC is then asked for a follow-up.
+   A complete quest walks to its ender. With nothing to walk to, legal prey
+   is sought out to 80 yards. An empty log, or a log with no seek objective,
+   checks other questgivers out to 120 yards. Otherwise the bot walks
+   nav-mesh steps inside a 150-yard leash of its bind point. Travel does
+   not teleport.
+   The bot turns with SetInFront and swings only when IsWithinMeleeRange,
+   in arc, and the attack timer is ready. A running timer is not reset.
+   GetDistance already subtracts combat reach, so the stop check is
+   IsWithinMeleeRange rather than a flat 5 yards. The state=melee line
+   includes attackTimer, ready, inMeleeRange, inArc, validAttack, los,
+   victim, health, weapon damage, and whether the swing was called.
+   A target whose health does not fall for 8 seconds is blacklisted.
+   An empty quest log walks to the nearest non-hostile quest giver that
+   has a spawn on the bot's map and a quest CanTakeQuest accepts. Players are refused unless PvP is 1 and the
+   player is the opposite faction. In a group the bot prefers the leader's
+   victim when that victim passes the same checks, and otherwise follows the
+   leader only between 8 and 40 yards on the same map.
+   PathGenerator must accept the step. The next point must be within 12 yards
+   horizontally and 4 yards vertically. A bad path does not move the bot.
+   There is no travel teleport, capital move, level change, experience grant,
+   or spell teach. A harmful spell is cast only when it is already in the
+   spellbook, off cooldown, and in range. Otherwise the bot uses Attack.
+   Playerbot.Debug.ForceDeathAfterKills defaults to 0. A scratch run can set
+   it above 0 to kill one bot after that many killing blows so the teleport
+   ack and resurrect path run. Death uses the core release-spirit and corpse-reclaim checks. A ghost
+   with a corpse on this map walks toward it. A ghost with no corpse walks
+   to the spirit healer or the closest graveyard, then calls the healer
+   resurrect: ResurrectPlayer(0.5), 25% durability loss, SpawnCorpseBones.
+   Resurrection sickness is applied only above level 10. If the walk does
+   not arrive within 20 seconds the bot is teleported to that graveyard.
+   ResurrectPlayer runs only after the teleport ack has cleared, and the
+   line is state=resurrect. Durability loss stays 25%.
+
+6. Starter quests, kill, gameobject, and talk
+   The bot walks to a held kill, object, or talk objective out to 120 yards,
+   or to the nearest spawn of that entry on the same map when the grid search
+   misses. Once that objective is in the log it does not seek another giver.
+   It accepts a quest when CanTakeQuest and CanAddQuest both pass, including
+   questgivers found out to 120 yards when the log has no seek objective.
+   Turn-in calls RewardQuest only when the status is complete,
+   the NPC is the involved giver, CanRewardQuest passes, and the quest has
+   no reward choice. Talk-to objectives call TalkedToCreature only when that
+   NPC is within interaction distance.
+   Item objectives loot an already-generated quest drop; they do not grant
+   items. Currency, reputation, and area-trigger objectives are skipped and
+   do not stop other fighting. Dungeons are not scripted. No quest was
+   completed in this cloud build.
+
+   Playerbot.Account.AllianceIds and HordeIds take extra comma-separated
+   account ids. The build does not create auth accounts. A faction cap of
+   25 is only the online limit; each account still stops at MaxCharacters.
+
+7. Build used for the public check
+   g++ , RelWithDebInfo
+   -DSERVERS=1 -DTOOLS=0 -DSCRIPTS=static -DBUILD_TESTING=1 -DBUILD_PLAYERBOT_V2=1
+   The server was not started and no database was written.
