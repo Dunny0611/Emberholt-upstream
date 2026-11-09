@@ -44,6 +44,7 @@ using Playerbot::V2::MarkerBindsOwner;
 using Playerbot::V2::LoginLevelAllowed;
 using Playerbot::V2::PersistedCapReached;
 using Playerbot::V2::FactoryVersion;
+using Playerbot::V2::AppendAccountIds;
 using Playerbot::V2::ClassifyObjective;
 using Playerbot::V2::ObjectiveSupport;
 using Playerbot::V2::MayAcceptQuest;
@@ -271,8 +272,12 @@ TEST_CASE("Starter quests accept, kill or use, and turn in only through the core
 {
     CHECK(ClassifyObjective(0) == ObjectiveSupport::Kill);
     CHECK(ClassifyObjective(2) == ObjectiveSupport::GameObject);
-    CHECK(ClassifyObjective(1) == ObjectiveSupport::Unsupported);
-    CHECK(ClassifyObjective(3) == ObjectiveSupport::Unsupported);
+    CHECK(ClassifyObjective(1) == ObjectiveSupport::Item);
+    CHECK(ClassifyObjective(3) == ObjectiveSupport::Talk);
+    CHECK(ClassifyObjective(4) == ObjectiveSupport::Unsupported);
+    CHECK(PlanObjective(1, true, true) == ObjectivePlan::Loot);
+    CHECK(PlanObjective(3, true, false) == ObjectivePlan::Talk);
+    CHECK(PlanObjective(4, true, true) == ObjectivePlan::Skip);
     CHECK(MayAcceptQuest(true, true, true, false, false));
     CHECK_FALSE(MayAcceptQuest(true, false, true, false, false));
     CHECK_FALSE(MayAcceptQuest(true, true, true, true, false));
@@ -282,7 +287,13 @@ TEST_CASE("Starter quests accept, kill or use, and turn in only through the core
     CHECK(PlanObjective(0, true, true) == ObjectivePlan::Attack);
     CHECK(PlanObjective(0, true, false) == ObjectivePlan::Refuse);
     CHECK(PlanObjective(2, true, false) == ObjectivePlan::UseObject);
-    CHECK(PlanObjective(1, true, true) == ObjectivePlan::HoldUnsupported);
+
+    std::vector<uint32_t> accounts;
+    AppendAccountIds("11, 12,11,0 13", accounts);
+    CHECK(accounts.size() == 3);
+    CHECK(accounts[0] == 11);
+    CHECK(accounts[1] == 12);
+    CHECK(accounts[2] == 13);
 }
 
 TEST_CASE("The kill switch and logout drop owned sessions only", "[PlayerbotCreation]")
@@ -353,9 +364,16 @@ TEST_CASE("Hostile targets are level-appropriate creatures, and players stay ref
     creature.level = 0;
     CHECK(JudgeHostile(creature) == HostileUse::Refuse);
     creature.level = 1;
+    creature.distance = 4.0f;
     creature.civilian = true;
-    CHECK(JudgeHostile(creature) == HostileUse::Refuse);
+    CHECK(JudgeHostile(creature) == HostileUse::Melee);
     creature.civilian = false;
+    creature.level = 5;
+    creature.distance = 4.0f;
+    CHECK(JudgeHostile(creature) == HostileUse::Melee);
+    creature.level = 8;
+    CHECK(JudgeHostile(creature) == HostileUse::Refuse);
+    creature.level = 1;
     creature.critter = true;
     CHECK(JudgeHostile(creature) == HostileUse::Refuse);
     creature.critter = false;

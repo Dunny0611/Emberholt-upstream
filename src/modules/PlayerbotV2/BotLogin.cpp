@@ -21,6 +21,7 @@
 #include "DatabaseEnv.h"
 #include "GameObject.h"
 #include "GameTime.h"
+#include "Loot.h"
 #include "LootItemType.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
@@ -170,15 +171,40 @@ bool EvaluateLocalStep(Player* bot, float towardX, float towardY, G3D::Vector3& 
     return LocalStepPoint(out.x - bot->GetPositionX(), out.y - bot->GetPositionY(), out.z - bot->GetPositionZ());
 }
 
+bool PathFirstStep(Player* bot, float destX, float destY, float destZ, G3D::Vector3& out)
+{
+    PathGenerator path(bot);
+    bool const calculated = path.CalculatePath(destX, destY, destZ);
+    if (!CorePathIsUsable(calculated, uint32_t(path.GetPathType())) || path.GetPath().size() < 2)
+        return false;
+    out = path.GetPath()[1];
+    return LocalStepPoint(out.x - bot->GetPositionX(), out.y - bot->GetPositionY(), out.z - bot->GetPositionZ());
+}
+
 bool WalkLocalStep(Player* bot, float towardX, float towardY)
 {
-    if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != IDLE_MOTION_TYPE)
+    MovementGeneratorType const motion = bot->GetMotionMaster()->GetCurrentMovementGeneratorType();
+    if (motion == POINT_MOTION_TYPE || motion == CHASE_MOTION_TYPE)
         return false;
     G3D::Vector3 point;
-    if (!EvaluateLocalStep(bot, towardX, towardY, point))
+    if (!PathFirstStep(bot, towardX, towardY, bot->GetPositionZ(), point))
         return false;
     bot->GetMotionMaster()->MovePoint(1, point.x, point.y, point.z);
     return true;
+}
+
+void EngageHostile(Player* bot, Unit* target)
+{
+    bot->SetFacingToObject(target);
+    if (!bot->IsWithinMeleeRange(target))
+    {
+        if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != CHASE_MOTION_TYPE)
+            bot->GetMotionMaster()->MoveChase(target);
+    }
+    if (bot->Attack(target, true))
+        bot->DoMeleeAttackIfReady();
+    else if (bot->GetVictim() == target)
+        bot->DoMeleeAttackIfReady();
 }
 
 uint32_t FindKnownHarmfulSpell(Player* bot, Unit* target)
@@ -215,6 +241,8 @@ bool RecoverOwnedBot(Player* bot)
     if (alive && !ghost)
         return false;
 
+    WorldLocation const& stored = bot->GetCorpseLocation();
+    bool const storedHere = bot->HasCorpse() && stored.GetMapId() == bot->GetMapId();
     Corpse* corpse = bot->GetCorpse();
     bool delayDone = false;
     bool inRange = false;
@@ -224,11 +252,11 @@ bool RecoverOwnedBot(Player* bot)
     {
         delayDone = time_t(corpse->GetGhostTime() + bot->GetCorpseReclaimDelay(corpse->GetType() == CORPSE_RESURRECTABLE_PVP)) <= time_t(GameTime::GetGameTime());
         inRange = corpse->IsWithinDistInMap(bot, CORPSE_RECLAIM_RADIUS, true);
-        if (corpse->GetMapId() == bot->GetMapId())
-            pathUsable = EvaluateLocalStep(bot, corpse->GetPositionX(), corpse->GetPositionY(), ignored);
     }
+    if (storedHere)
+        pathUsable = PathFirstStep(bot, stored.GetPositionX(), stored.GetPositionY(), stored.GetPositionZ(), ignored);
 
-    switch (ChooseRecovery(alive, ghost, corpse != nullptr, delayDone, inRange, pathUsable))
+    switch (ChooseRecovery(alive, ghost, storedHere, delayDone, inRange, pathUsable))
     {
         case RecoveryKind::ReleaseSpirit:
             if (bot->IsBeingTeleported() || bot->HasAuraType(SPELL_AURA_PREVENT_RESURRECTION))
@@ -246,8 +274,8 @@ bool RecoverOwnedBot(Player* bot)
             bot->SpawnCorpseBones();
             return true;
         case RecoveryKind::WalkToCorpse:
-            if (corpse)
-                WalkLocalStep(bot, corpse->GetPositionX(), corpse->GetPositionY());
+            if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+                WalkLocalStep(bot, stored.GetPositionX(), stored.GetPositionY());
             return true;
         case RecoveryKind::Hold:
         case RecoveryKind::None:
@@ -308,7 +336,8 @@ Unit* SelectHostile(Player* bot, Player* leader, bool pvpEnabled)
     return nearest;
 }
 
-bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget, bool& blockFreeCombat);
+bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget);
+void TryLootQuestItems(Player* bot, Unit* target);
 
 void StepOneOwnedBot(bool pvpEnabled)
 {
@@ -345,29 +374,27 @@ void StepOneOwnedBot(bool pvpEnabled)
         }
 
         Unit* questTarget = nullptr;
-        bool blockFreeCombat = false;
-        if (ActOnStarterQuest(bot, pvpEnabled, questTarget, blockFreeCombat))
-            continue;
-        if (blockFreeCombat && !questTarget)
+        if (ActOnStarterQuest(bot, pvpEnabled, questTarget))
             continue;
 
         Unit* target = questTarget ? questTarget : SelectHostile(bot, leader, pvpEnabled);
         if (!target)
             continue;
         HostileUse const use = JudgeHostile(FactsFor(bot, target, pvpEnabled));
-        if (use == HostileUse::Melee)
+        if (use == HostileUse::Melee || use == HostileUse::Approach)
         {
-            if (uint32_t spellId = FindKnownHarmfulSpell(bot, target))
+            if (use == HostileUse::Melee)
             {
-                SpellCastResult const cast = bot->CastSpell(CastSpellTargetArg(target), spellId);
-                if (cast == SPELL_CAST_OK)
-                    continue;
+                if (uint32_t spellId = FindKnownHarmfulSpell(bot, target))
+                {
+                    SpellCastResult const cast = bot->CastSpell(CastSpellTargetArg(target), spellId);
+                    if (cast == SPELL_CAST_OK)
+                        continue;
+                }
             }
-            if (bot->GetVictim() != target)
-                bot->Attack(target, true);
+            EngageHostile(bot, target);
+            TryLootQuestItems(bot, target);
         }
-        else if (use == HostileUse::Approach)
-            WalkLocalStep(bot, target->GetPositionX(), target->GetPositionY());
     }
 }
 
@@ -419,10 +446,24 @@ bool LogoutOwned(ObjectGuid character, std::string& detail)
     return false;
 }
 
-bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget, bool& blockFreeCombat)
+void TryLootQuestItems(Player* bot, Unit* target)
+{
+    Creature* creature = target->ToCreature();
+    if (!creature || creature->IsAlive() || !creature->m_loot || bot->GetDistance(creature) > INTERACTION_DISTANCE)
+        return;
+    Loot* loot = creature->m_loot.get();
+    for (uint8 slot = 0; slot < loot->items.size() && slot < 16; ++slot)
+    {
+        LootItem const& item = loot->items[slot];
+        if (item.is_looted || !item.needs_quest)
+            continue;
+        bot->StoreLootItem(creature->GetGUID(), slot, loot);
+    }
+}
+
+bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
 {
     combatTarget = nullptr;
-    blockFreeCombat = false;
 
     auto nearestInvolved = [&](uint32_t questId) -> Creature*
     {
@@ -464,11 +505,7 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget, bool& 
         bool const choice = quest->GetRewChoiceItemsCount() > 0;
         bool const canReward = bot->CanRewardQuest(quest, false) && bot->CanRewardQuest(quest, LootItemType::Item, 0, false);
         if (!MayTurnInQuest(true, canReward, true, choice))
-        {
-            if (choice)
-                blockFreeCombat = true;
             continue;
-        }
         if (bot->GetDistance(giver) > INTERACTION_DISTANCE)
         {
             WalkLocalStep(bot, giver->GetPositionX(), giver->GetPositionY());
@@ -478,7 +515,6 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget, bool& 
         return true;
     }
 
-    bool sawUnsupported = false;
     for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
     {
         uint32_t const questId = bot->GetQuestSlotQuestId(slot);
@@ -492,10 +528,57 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget, bool& 
             if (objective.Amount > 0 && bot->GetQuestObjectiveData(objective) >= objective.Amount)
                 continue;
             ObjectiveSupport const support = ClassifyObjective(objective.Type);
-            if (support == ObjectiveSupport::Unsupported)
-            {
-                sawUnsupported = true;
+            if (support == ObjectiveSupport::Unsupported || PlanObjective(objective.Type, objective.ObjectID > 0, true) == ObjectivePlan::Skip)
                 continue;
+            if (support == ObjectiveSupport::Item)
+            {
+                std::list<Creature*> corpses;
+                struct DeadNearby
+                {
+                    Player const* bot = nullptr;
+                    bool operator()(Creature const* creature) const
+                    {
+                        return creature && !creature->IsAlive() && bot->IsWithinDist(creature, INTERACTION_DISTANCE);
+                    }
+                } deadCheck { bot };
+                Trinity::CreatureListSearcher deadSearcher(bot, corpses, deadCheck);
+                Cell::VisitGridObjects(bot, deadSearcher, INTERACTION_DISTANCE);
+                bool looted = false;
+                for (Creature* creature : corpses)
+                {
+                    uint8_t const before = creature->m_loot ? uint8_t(std::min<size_t>(creature->m_loot->items.size(), 16)) : 0;
+                    TryLootQuestItems(bot, creature);
+                    if (before)
+                        looted = true;
+                }
+                if (looted)
+                    return true;
+                continue;
+            }
+            if (support == ObjectiveSupport::Talk && objective.ObjectID > 0)
+            {
+                std::list<Creature*> speakers;
+                bot->GetCreatureListWithEntryInGrid(speakers, uint32_t(objective.ObjectID), AcquireYards);
+                Creature* speaker = nullptr;
+                float speakerDist = AcquireYards + 1.0f;
+                for (Creature* creature : speakers)
+                {
+                    float const distance = bot->GetDistance(creature);
+                    if (distance < speakerDist)
+                    {
+                        speaker = creature;
+                        speakerDist = distance;
+                    }
+                }
+                if (!speaker)
+                    continue;
+                if (speakerDist > INTERACTION_DISTANCE)
+                {
+                    WalkLocalStep(bot, speaker->GetPositionX(), speaker->GetPositionY());
+                    return true;
+                }
+                bot->TalkedToCreature(speaker->GetEntry(), speaker->GetGUID());
+                return true;
             }
             if (support == ObjectiveSupport::Kill && objective.ObjectID > 0)
             {
@@ -515,12 +598,9 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget, bool& 
                     }
                 }
                 if (!nearest)
-                {
-                    blockFreeCombat = true;
-                    return true;
-                }
+                    continue;
                 if (PlanObjective(objective.Type, true, true) != ObjectivePlan::Attack)
-                    return true;
+                    continue;
                 if (bot->GetDistance(nearest) > MeleeReachYards)
                 {
                     WalkLocalStep(bot, nearest->GetPositionX(), nearest->GetPositionY());
@@ -544,11 +624,8 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget, bool& 
                         nearestDist = distance;
                     }
                 }
-                if (!nearest || PlanObjective(objective.Type, nearest != nullptr, false) != ObjectivePlan::UseObject)
-                {
-                    blockFreeCombat = true;
-                    return true;
-                }
+                if (!nearest || PlanObjective(objective.Type, true, false) != ObjectivePlan::UseObject)
+                    continue;
                 if (bot->GetDistance(nearest) > INTERACTION_DISTANCE)
                 {
                     WalkLocalStep(bot, nearest->GetPositionX(), nearest->GetPositionY());
@@ -558,11 +635,6 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget, bool& 
                 return true;
             }
         }
-    }
-    if (sawUnsupported)
-    {
-        blockFreeCombat = true;
-        return true;
     }
 
     std::list<Creature*> nearby;

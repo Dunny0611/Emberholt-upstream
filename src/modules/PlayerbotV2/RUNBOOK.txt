@@ -47,9 +47,11 @@ applies that directory by itself.
 
 5. Combat and movement
    One owned bot, one action, 5ms budget. Playerbot.PvP defaults to 0.
-   A target must be a living creature this bot can legally attack, not a
-   civilian, critter, pet, totem, or game master, and its level must be at
-   most the bot's level plus 2. Players are refused unless PvP is 1 and the
+   A target must be a living legal attack target, not a critter, pet, totem,
+   or game master, and its level must be at most the bot's level plus 4.
+   The creature-template civilian flag does not by itself refuse a hostile.
+   The bot faces the target, chases into melee range, and swings through the
+   normal attack timer. Players are refused unless PvP is 1 and the
    player is the opposite faction. In a group the bot prefers the leader's
    victim when that victim passes the same checks, and otherwise follows the
    leader only between 8 and 40 yards on the same map.
@@ -59,7 +61,8 @@ applies that directory by itself.
    or spell teach. A harmful spell is cast only when it is already in the
    spellbook, off cooldown, and in range. Otherwise the bot uses Attack.
    Death uses the core release-spirit and corpse-reclaim checks. A ghost
-   walks toward its corpse only on a valid local path.
+   walks toward the stored corpse location on a valid path. A spirit healer
+   is not used.
 
 6. Starter quests, kill and gameobject only
    Within 30 yards the bot can accept a quest when CanTakeQuest and
@@ -67,11 +70,16 @@ applies that directory by itself.
    quest-objective creature that also passes the combat checks, or Use a
    quest-objective gameobject. Turn-in calls RewardQuest only when the
    status is complete, the NPC is the involved giver, CanRewardQuest passes,
-   and the quest has no reward choice. Item, talk-to, currency, reputation,
-   and area-trigger objectives are refused. An unsupported objective does
-   not get free credit and does not send the bot to grind a different
-   creature. Dungeons are not scripted. No quest was completed in the cloud
-   build.
+   and the quest has no reward choice. Talk-to objectives call
+   TalkedToCreature only when that NPC is within interaction distance.
+   Item objectives loot an already-generated quest drop; they do not grant
+   items. Currency, reputation, and area-trigger objectives are skipped and
+   do not stop other fighting. Dungeons are not scripted. No quest was
+   completed in this cloud build.
+
+   Playerbot.Account.AllianceIds and HordeIds take extra comma-separated
+   account ids. The build does not create auth accounts. A faction cap of
+   25 is only the online limit; each account still stops at MaxCharacters.
 
 7. Build used for the public check
    g++ , RelWithDebInfo

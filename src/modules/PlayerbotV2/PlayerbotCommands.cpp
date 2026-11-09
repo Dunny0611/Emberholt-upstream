@@ -9,6 +9,7 @@
 
 #include "BotLogin.h"
 #include "CharacterFactory.h"
+#include "LifecyclePolicy.h"
 #include "Config.h"
 #include "CharacterCache.h"
 #include "Chat.h"
@@ -21,7 +22,9 @@
 
 #include <algorithm>
 #include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 using namespace Trinity::ChatCommands;
 
@@ -37,13 +40,21 @@ Playerbot::V2::PopulationConfig ReadPopulation()
     return config;
 }
 
-uint32_t PoolAccount(Playerbot::V2::BotFaction faction)
+std::vector<uint32_t> PoolAccounts(Playerbot::V2::BotFaction faction)
 {
+    using Playerbot::V2::AppendAccountIds;
+    std::vector<uint32_t> ids;
     if (faction == Playerbot::V2::BotFaction::Alliance)
-        return uint32_t(std::max(0, sConfigMgr->GetIntDefault("Playerbot.Account.Alliance"sv, 0)));
-    if (faction == Playerbot::V2::BotFaction::Horde)
-        return uint32_t(std::max(0, sConfigMgr->GetIntDefault("Playerbot.Account.Horde"sv, 0)));
-    return 0;
+    {
+        AppendAccountIds(std::to_string(std::max(0, sConfigMgr->GetIntDefault("Playerbot.Account.Alliance"sv, 0))), ids);
+        AppendAccountIds(sConfigMgr->GetStringDefault("Playerbot.Account.AllianceIds"sv, ""sv), ids);
+    }
+    else if (faction == Playerbot::V2::BotFaction::Horde)
+    {
+        AppendAccountIds(std::to_string(std::max(0, sConfigMgr->GetIntDefault("Playerbot.Account.Horde"sv, 0))), ids);
+        AppendAccountIds(sConfigMgr->GetStringDefault("Playerbot.Account.HordeIds"sv, ""sv), ids);
+    }
+    return ids;
 }
 
 bool HandleCreate(ChatHandler* handler, std::string const& name, uint8 race, uint8 classId, uint8 sex)
@@ -56,9 +67,10 @@ bool HandleCreate(ChatHandler* handler, std::string const& name, uint8 race, uin
     request.config = config;
     request.alreadyOnline = OnlineCount(faction);
     request.maxOnAccount = uint32_t(std::max(0, sConfigMgr->GetIntDefault("Playerbot.Account.MaxCharacters"sv, 10)));
+    std::vector<uint32_t> const mine = PoolAccounts(faction);
+    std::vector<uint32_t> const other = PoolAccounts(faction == BotFaction::Alliance ? BotFaction::Horde : BotFaction::Alliance);
     request.poolFaction = faction;
-    request.otherFactionPoolAccount = PoolAccount(faction == BotFaction::Alliance ? BotFaction::Horde : BotFaction::Alliance);
-    request.character.poolAccountId = PoolAccount(faction);
+    request.otherFactionPoolAccount = 0;
     request.character.ownerAccountId = owner;
     request.character.race = race;
     request.character.classId = classId;
@@ -66,7 +78,18 @@ bool HandleCreate(ChatHandler* handler, std::string const& name, uint8 race, uin
     request.character.level = NewBotLevel;
     request.name = name;
 
-    PersistResult const result = PersistLevelOneCharacter(request);
+    PersistResult result { CreateRefusal::MissingPoolAccount, ObjectGuid::Empty, "no pool account is configured for that faction" };
+    for (uint32_t accountId : mine)
+    {
+        if (accountId == 0 || accountId == owner)
+            continue;
+        if (std::find(other.begin(), other.end(), accountId) != other.end())
+            continue;
+        request.character.poolAccountId = accountId;
+        result = PersistLevelOneCharacter(request);
+        if (result.refusal != CreateRefusal::AccountFull && result.refusal != CreateRefusal::PrivilegedAccount && result.refusal != CreateRefusal::UnknownAccount)
+            break;
+    }
     if (result.refusal != CreateRefusal::None)
     {
         handler->PSendSysMessage("Playerbot create refused (%u): %s", uint32_t(result.refusal), result.detail.c_str());
@@ -99,7 +122,8 @@ bool HandleLogin(ChatHandler* handler, std::string const& name)
     }
     BotFaction const faction = FactionForStarterRace(entry->Race);
     PopulationConfig const config = ReadPopulation();
-    if (entry->AccountId != PoolAccount(faction))
+    std::vector<uint32_t> const accounts = PoolAccounts(faction);
+    if (std::find(accounts.begin(), accounts.end(), entry->AccountId) == accounts.end())
     {
         handler->PSendSysMessage("Playerbot login refused: %s is not on the configured pool account", normalized.c_str());
         handler->SetSentErrorMessage(true);

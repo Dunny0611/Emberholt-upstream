@@ -22,6 +22,8 @@ enum class ObjectiveSupport : uint8_t
 {
     Kill = 0,
     GameObject,
+    Talk,
+    Item,
     Unsupported
 };
 
@@ -31,8 +33,12 @@ inline ObjectiveSupport ClassifyObjective(uint8_t type)
     {
         case 0: // QUEST_OBJECTIVE_MONSTER
             return ObjectiveSupport::Kill;
+        case 1: // QUEST_OBJECTIVE_ITEM, progressed by normal loot, never by a grant
+            return ObjectiveSupport::Item;
         case 2: // QUEST_OBJECTIVE_GAMEOBJECT
             return ObjectiveSupport::GameObject;
+        case 3: // QUEST_OBJECTIVE_TALKTO
+            return ObjectiveSupport::Talk;
         default:
             return ObjectiveSupport::Unsupported;
     }
@@ -53,9 +59,12 @@ enum class ObjectivePlan : uint8_t
     Refuse = 0,
     Attack,
     UseObject,
-    HoldUnsupported
+    Talk,
+    Loot,
+    Skip
 };
 
+// An unsupported or item objective does not freeze the rest of combat.
 inline ObjectivePlan PlanObjective(uint8_t type, bool entryPresent, bool hostileAllowed)
 {
     switch (ClassifyObjective(type))
@@ -68,10 +77,16 @@ inline ObjectivePlan PlanObjective(uint8_t type, bool entryPresent, bool hostile
             if (!entryPresent)
                 return ObjectivePlan::Refuse;
             return ObjectivePlan::UseObject;
+        case ObjectiveSupport::Talk:
+            if (!entryPresent)
+                return ObjectivePlan::Refuse;
+            return ObjectivePlan::Talk;
+        case ObjectiveSupport::Item:
+            return ObjectivePlan::Loot;
         case ObjectiveSupport::Unsupported:
-            return ObjectivePlan::HoldUnsupported;
+            return ObjectivePlan::Skip;
     }
-    return ObjectivePlan::HoldUnsupported;
+    return ObjectivePlan::Skip;
 }
 }
 #endif

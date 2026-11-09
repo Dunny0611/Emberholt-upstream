@@ -42,10 +42,11 @@ Public compile of the archive, g++ 13.3.0, against this tree's headers:
 
   Owned bots accept a same-faction non-bot group invite. One action per
   tick may follow a usable local PathGenerator step, cast one harmful spell
-  the character already knows, or Attack. Targets are living legal creatures
-  within two levels, or an opposite-faction player only when Playerbot.PvP
-  is 1. Civilians, critters, pets, totems, game masters, and same-faction
-  players are refused. A group follows its leader between 8 and 40 yards and
+  the character already knows, or Attack.   Targets are living legal creatures
+  within four levels. The civilian template flag is not a combat ban.
+  Critters, pets, totems, game masters, and same-faction players are refused.
+  An opposite-faction player is eligible only when Playerbot.PvP is 1.
+  The bot faces the target, chases into melee, and swings on the normal timer. A group follows its leader between 8 and 40 yards and
   prefers the leader's victim when that victim passes the same checks.
   Death uses the core release-spirit and corpse-reclaim checks. A ghost
   without a usable path waits. There is no travel teleport, experience

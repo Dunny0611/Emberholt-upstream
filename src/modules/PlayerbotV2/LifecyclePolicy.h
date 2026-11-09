@@ -15,6 +15,8 @@
 
 #include "CreationPolicy.h"
 #include <cstdint>
+#include <string_view>
+#include <vector>
 
 namespace Playerbot::V2
 {
@@ -95,6 +97,39 @@ inline bool LoginLevelAllowed(uint8_t level, uint8_t maxLevel)
 
 // MaxCharacters counts persisted rows, not the online cap. Either the marker
 // count or the character-table count fills the account.
+// Comma or whitespace separated account ids. Zero is dropped. Duplicates are dropped.
+inline void AppendAccountIds(std::string_view text, std::vector<uint32_t>& ids)
+{
+    uint32_t value = 0;
+    bool inNumber = false;
+    auto push = [&]()
+    {
+        if (inNumber && value != 0)
+        {
+            bool seen = false;
+            for (uint32_t existing : ids)
+                if (existing == value)
+                    seen = true;
+            if (!seen)
+                ids.push_back(value);
+        }
+        value = 0;
+        inNumber = false;
+    };
+    for (char character : text)
+    {
+        if (character >= '0' && character <= '9')
+        {
+            inNumber = true;
+            if (value <= 100000000u)
+                value = value * 10u + uint32_t(character - '0');
+        }
+        else
+            push();
+    }
+    push();
+}
+
 inline bool PersistedCapReached(uint32_t markerRows, uint32_t characterRows, uint32_t maxOnAccount)
 {
     return maxOnAccount == 0 || markerRows >= maxOnAccount || characterRows >= maxOnAccount;

@@ -23,7 +23,8 @@ inline constexpr float MeleeReachYards = 5.0f;
 inline constexpr float AcquireYards = 30.0f;
 inline constexpr float FollowMinYards = 8.0f;
 inline constexpr float FollowMaxYards = 40.0f;
-inline constexpr uint8_t LevelHeadroom = 2;
+// Starter beasts are often a few levels above a new character. Elites far above this stay refused.
+inline constexpr uint8_t LevelHeadroom = 4;
 
 struct HostileFacts
 {
@@ -51,7 +52,10 @@ enum class HostileUse : uint8_t
 
 inline HostileUse JudgeHostile(HostileFacts const& facts)
 {
-    if (!facts.alive || !facts.validAttack || facts.gameMaster || facts.civilian || facts.critter || facts.pet)
+    // CIVILIAN is a template extra flag. Hostile starter beasts can carry it, so it is not a combat ban.
+    // IsValidAttackTarget is the combat rule. Critters, pets, and totems stay refused.
+    (void)facts.civilian;
+    if (!facts.alive || !facts.validAttack || facts.gameMaster || facts.critter || facts.pet)
         return HostileUse::Refuse;
     if (facts.player)
     {

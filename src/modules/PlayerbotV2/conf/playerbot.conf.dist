@@ -16,11 +16,14 @@ Playerbot.Population.Alliance = 0
 Playerbot.Population.Horde = 0
 
 # Existing player-security auth account ids. 0 refuses creation.
-# The two ids must be different. A GM, admin, or console account is refused.
-# This build does not create auth accounts and does not adopt an account that
-# lacks a playerbot_v2_character row. Login also requires that row and level 1.
+# AllianceIds and HordeIds are optional comma-separated extras so one faction
+# can use several accounts. This build does not create auth accounts.
+# An id listed for both factions is ignored. A GM account is refused.
+# Login requires a factory marker on one of these accounts. Level may be above 1.
 Playerbot.Account.Alliance = 0
 Playerbot.Account.Horde = 0
+Playerbot.Account.AllianceIds =
+Playerbot.Account.HordeIds =
 
 # One action per world tick, 5ms budget. A bad path does not move the bot.
 # Starter areas are used when a tile is actually present. Do not raise population here.
@@ -28,5 +31,7 @@ Playerbot.Account.Horde = 0
 # Attack an opposite-faction player only when this is 1. Default refuses every player.
 Playerbot.PvP = 0
 
-# Characters kept on one pool account. Further creates are refused.
+# Persisted characters and marker rows per pool account, not the online cap.
+# Online count is Playerbot.Population.*. 25 online needs that cap plus enough
+# account ids that MaxCharacters times the account count can hold them.
 Playerbot.Account.MaxCharacters = 10
