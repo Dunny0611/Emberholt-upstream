@@ -137,6 +137,9 @@ class TC_GAME_API ReputationMgr
         void SetVisible(FactionTemplateEntry const* factionTemplateEntry);
         void SetVisible(FactionEntry const* factionEntry);
         void SetAtWar(RepListID repListID, bool on);
+        // Sets AtWar even when the faction is Peaceful. Classic beasts are attackable neutrals whose
+        // retail reputation row hides the at-war button, which makes IsValidAttackTarget return false.
+        void SetAtWarForCombat(FactionEntry const* factionEntry);
         void SetInactive(RepListID repListID, bool on);
 
         void ApplyForceReaction(uint32 faction_id, ReputationRank rank, bool apply);

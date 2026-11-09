@@ -415,12 +415,16 @@ TEST_CASE("Hostile targets are level-appropriate creatures, and players stay ref
     creature.validAttack = false;
     creature.factionHostile = true;
     creature.level = 0;
+    CHECK(JudgeHostile(creature) == HostileUse::Refuse);
+    CHECK(std::string_view(HostileRefuseReason(creature)) == "not-valid-attack");
+    creature.validAttack = true;
     CHECK(JudgeHostile(creature) == HostileUse::Melee);
     CHECK(std::string_view(HostileRefuseReason(creature)) == "ok");
     creature.factionHostile = false;
     creature.level = 1;
+    creature.validAttack = false;
     CHECK(JudgeHostile(creature) == HostileUse::Refuse);
-    CHECK(std::string_view(HostileRefuseReason(creature)) == "not-hostile");
+    CHECK(std::string_view(HostileRefuseReason(creature)) == "not-valid-attack");
     creature.validAttack = true;
     creature.gameMaster = true;
     CHECK(JudgeHostile(creature) == HostileUse::Refuse);
@@ -495,12 +499,20 @@ TEST_CASE("Classic starter beasts stay eligible when reaction and attack checks 
     FactionTemplateFacts const monster = ClassicTemplate(14, 14, 0, 8, 0, 1);
     FactionTemplateFacts const ambient = ClassicTemplate(35, 31, 0, 0, 1, 0);
 
-    HostileFacts const mottledBoar = ClassicCreature(3098, 1, 0, 0, false, beast, horde);
-    HostileFacts const mottledBoarMax = ClassicCreature(3098, 2, 0, 0, false, beast, horde);
-    HostileFacts const scorpid = ClassicCreature(3124, 3, 0, 0, false, creatureNeutral, horde);
-    HostileFacts const rockjaw = ClassicCreature(707, 1, 0, 0, true, trogg, alliance);
-    HostileFacts const burly = ClassicCreature(724, 2, 0, 0, true, trogg, alliance);
-    HostileFacts const crag = ClassicCreature(708, 3, 0, 0, false, cragBoar, alliance);
+    HostileFacts mottledBoar = ClassicCreature(3098, 1, 0, 0, false, beast, horde);
+    HostileFacts mottledBoarMax = ClassicCreature(3098, 2, 0, 0, false, beast, horde);
+    HostileFacts scorpid = ClassicCreature(3124, 3, 0, 0, false, creatureNeutral, horde);
+    HostileFacts rockjaw = ClassicCreature(707, 1, 0, 0, true, trogg, alliance);
+    HostileFacts burly = ClassicCreature(724, 2, 0, 0, true, trogg, alliance);
+    HostileFacts crag = ClassicCreature(708, 3, 0, 0, false, cragBoar, alliance);
+    CHECK(JudgeHostile(mottledBoar) == HostileUse::Refuse);
+    CHECK(std::string_view(HostileRefuseReason(mottledBoar)) == "not-valid-attack");
+    mottledBoar.validAttack = true;
+    mottledBoarMax.validAttack = true;
+    scorpid.validAttack = true;
+    rockjaw.validAttack = true;
+    burly.validAttack = true;
+    crag.validAttack = true;
     HostileFacts const kaltunk = ClassicCreature(10176, 20, 2, 4864, true, orgrimmar, horde);
     HostileFacts const gornek = ClassicCreature(3143, 5, 3, 4864, true, orgrimmar, horde);
     HostileFacts const sten = ClassicCreature(658, 5, 3, 0, true, ironforge, alliance);
@@ -528,11 +540,12 @@ TEST_CASE("Classic starter beasts stay eligible when reaction and attack checks 
 
     HostileFacts monsterPrey = ClassicCreature(1, 1, 0, 0, false, monster, horde);
     monsterPrey.distance = 4.0f;
+    monsterPrey.validAttack = true;
     CHECK(JudgeHostile(monsterPrey) == HostileUse::Melee);
 
     HostileFacts friendlyAmbient = ClassicCreature(1, 1, 0, 0, false, ambient, horde);
     CHECK(JudgeHostile(friendlyAmbient) == HostileUse::Refuse);
-    CHECK(std::string_view(HostileRefuseReason(friendlyAmbient)) == "not-hostile");
+    CHECK(std::string_view(HostileRefuseReason(friendlyAmbient)) == "not-valid-attack");
 
     HostileFacts critter = mottledBoar;
     critter.critter = true;
@@ -622,17 +635,20 @@ TEST_CASE("A wolf outside 30 yards is sought, and friendly guards stay refused",
     HostileFacts mountaineer = ClassicCreature(853, 55, 0, 4096, false, ironforgeGuard, alliance);
     mountaineer.distance = 8.0f;
     CHECK(JudgeHostile(mountaineer) == HostileUse::Refuse);
-    CHECK(std::string_view(HostileRefuseReason(mountaineer)) == "not-hostile");
+    CHECK(std::string_view(HostileRefuseReason(mountaineer)) == "not-valid-attack");
     CHECK(mountaineer.templateFriendly);
 
     HostileFacts denGrunt = ClassicCreature(5952, 55, 0, 36864, false, orgrimmarGuard, horde);
     denGrunt.distance = 8.0f;
     CHECK(JudgeHostile(denGrunt) == HostileUse::Refuse);
-    CHECK(std::string_view(HostileRefuseReason(denGrunt)) == "not-hostile");
+    CHECK(std::string_view(HostileRefuseReason(denGrunt)) == "not-valid-attack");
     CHECK(denGrunt.templateFriendly);
 
     HostileFacts wolf = ClassicCreature(705, 1, 0, 0, true, wolfFaction, alliance);
     wolf.distance = 47.0f;
+    CHECK(JudgeHostile(wolf) == HostileUse::Refuse);
+    CHECK(std::string_view(HostileRefuseReason(wolf)) == "not-valid-attack");
+    wolf.validAttack = true;
     CHECK(JudgeHostile(wolf) == HostileUse::Refuse);
     CHECK(std::string_view(HostileRefuseReason(wolf)) == "level-or-range");
     CHECK(JudgeHostile(wolf, PreySeekYards) == HostileUse::Approach);

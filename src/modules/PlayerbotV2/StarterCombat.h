@@ -147,10 +147,7 @@ enum class HostileUse : uint8_t
 inline HostileUse JudgeHostile(HostileFacts const& facts, float approachYards = AcquireYards)
 {
     // CIVILIAN (template extra flag 0x2) is not a combat ban. Rockjaw troggs carry it and are prey.
-    // Classic starter beasts are neutral on the faction template (no enemy mask), and a clientless
-    // bot's reputation reaction is often friendly or neutral, so template neutrality is prey.
-    // IsValidAttackTarget is not required: it re-checks phase and the at-war reputation bit.
-    // A creature with unit level 0 still uses band level 1.
+    // Creatures must pass IsValidAttackTarget. A level of 0 still uses band level 1.
     (void)facts.civilian;
     if (!facts.alive || facts.gameMaster || facts.critter || facts.totem || facts.pet)
         return HostileUse::Refuse;
@@ -163,9 +160,9 @@ inline HostileUse JudgeHostile(HostileFacts const& facts, float approachYards = 
         return HostileUse::Refuse;
     else if (facts.immune)
         return HostileUse::Refuse;
-    else if (facts.nonCombatService && !facts.templateHostile && !facts.factionHostile)
+    else if (facts.nonCombatService)
         return HostileUse::Refuse;
-    else if (!facts.templateHostile && !facts.factionHostile && !facts.validAttack && !facts.neutralPrey)
+    else if (!facts.validAttack)
         return HostileUse::Refuse;
     uint8_t const bandLevel = facts.level == 0 && facts.creature ? uint8_t(1) : facts.level;
     if (bandLevel == 0 || uint32_t(bandLevel) > uint32_t(facts.botLevel) + LevelHeadroom)
@@ -272,10 +269,10 @@ inline char const* HostileRefuseReason(HostileFacts const& facts)
         return "not-creature";
     if (facts.immune)
         return "not-attackable";
-    if (facts.nonCombatService && !facts.templateHostile && !facts.factionHostile)
+    if (facts.nonCombatService)
         return "civilian";
-    if (!facts.templateHostile && !facts.factionHostile && !facts.validAttack && !facts.neutralPrey)
-        return "not-hostile";
+    if (!facts.validAttack)
+        return "not-valid-attack";
     return "level-or-range";
 }
 

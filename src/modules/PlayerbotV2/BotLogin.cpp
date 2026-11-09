@@ -34,6 +34,7 @@
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "PathGenerator.h"
+#include "PhasingHandler.h"
 #include "PetDefines.h"
 #include "Player.h"
 #include "RealmList.h"
@@ -49,6 +50,7 @@
 #include <list>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Playerbot::V2
@@ -278,6 +280,22 @@ bool WalkLocalStep(Player* bot, float towardX, float towardY)
 
 bool MoveToward(Player* bot, float towardX, float towardY)
 {
+    if (bot->m_homebind.GetMapId() == bot->GetMapId())
+    {
+        float const anchorX = bot->m_homebind.GetPositionX();
+        float const anchorY = bot->m_homebind.GetPositionY();
+        float const dx = towardX - anchorX;
+        float const dy = towardY - anchorY;
+        float const destDistance = std::sqrt(dx * dx + dy * dy);
+        float const here = bot->GetExactDist2d(anchorX, anchorY);
+        if (destDistance > WanderLeashYards)
+        {
+            if (here <= WanderLeashYards)
+                return false;
+            towardX = anchorX;
+            towardY = anchorY;
+        }
+    }
     MovementGeneratorType const motion = bot->GetMotionMaster()->GetCurrentMovementGeneratorType();
     if (motion == POINT_MOTION_TYPE || motion == CHASE_MOTION_TYPE)
         return true;
@@ -295,7 +313,41 @@ void TryMarkAtWar(Player* bot, Unit* target)
     FactionEntry const* faction = sFactionStore.LookupEntry(factionTemplate->Faction);
     if (!faction || !faction->CanHaveReputation() || bot->GetReputationMgr().IsAtWar(faction))
         return;
-    bot->GetReputationMgr().SetAtWar(uint32(faction->ReputationIndex), true);
+    bot->GetReputationMgr().SetAtWarForCombat(faction);
+}
+
+char const* AttackBlockReason(Player const* bot, Unit const* target)
+{
+    if (target->HasUnitState(UNIT_STATE_UNATTACKABLE))
+        return "unattackable-state";
+    if (!bot->CanSeeOrDetect(target))
+        return "cannot-see";
+    if (!target->IsAlive())
+        return "dead";
+    if (target->HasUnitFlag(UNIT_FLAG_NON_ATTACKABLE_2))
+        return "non-attackable-2";
+    if (target->IsUninteractible())
+        return "uninteractible";
+    if (bot->HasPlayerFlag(PLAYER_FLAGS_UBER))
+        return "uber";
+    if (target->HasUnitFlag(UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_ON_TAXI | UNIT_FLAG_NOT_ATTACKABLE_1))
+        return "non-attackable";
+    if (bot->IsImmuneToNPC())
+        return "immune-to-npc";
+    if (target->IsImmuneToPC())
+        return "immune-to-pc";
+    if (bot->IsFriendlyTo(target))
+        return "friendly";
+    if (target->IsFriendlyTo(bot))
+        return "friendly-from";
+    if (FactionTemplateEntry const* factionTemplate = target->GetFactionTemplateEntry())
+        if (FactionEntry const* faction = sFactionStore.LookupEntry(factionTemplate->Faction))
+            if (FactionState const* state = bot->GetReputationMgr().GetState(faction))
+                if (!state->Flags.HasFlag(ReputationFlags::AtWar))
+                    return "not-at-war";
+    if (!bot->IsValidAttackTarget(target))
+        return "other";
+    return "ok";
 }
 
 SwingFacts SwingFor(Player const* bot, Unit const* target)
@@ -313,22 +365,23 @@ struct MeleeTrace
     SwingFacts swing;
     bool validAttack = false;
     bool los = false;
+    char const* attackBlock = "ok";
     bool attacked = false;
     bool swingCalled = false;
     float minDamage = 0.0f;
     float maxDamage = 0.0f;
 };
 
-struct TargetWatch
+struct HpWatch
 {
-    ObjectGuid guid;
     uint32_t health = 0;
     uint32_t since = 0;
+    bool started = false;
 };
 
-std::unordered_map<uint64_t, TargetWatch>& MeleeWatches()
+std::unordered_map<uint64_t, std::unordered_map<uint64_t, HpWatch>>& MeleeWatches()
 {
-    static std::unordered_map<uint64_t, TargetWatch> watches;
+    static std::unordered_map<uint64_t, std::unordered_map<uint64_t, HpWatch>> watches;
     return watches;
 }
 
@@ -357,19 +410,19 @@ bool IsMeleeBlacklisted(Player const* bot, ObjectGuid guid)
 void BlacklistMeleeTarget(Player* bot, ObjectGuid guid)
 {
     MeleeBlacklist()[bot->GetGUID().GetCounter()][guid.GetCounter()] = GameTime::GetGameTimeMS() + 120000;
-    MeleeWatches().erase(bot->GetGUID().GetCounter());
+    MeleeWatches()[bot->GetGUID().GetCounter()].erase(guid.GetCounter());
     if (bot->GetVictim() && bot->GetVictim()->GetGUID() == guid)
         bot->AttackStop();
 }
 
 bool MeleeGaveUp(Player* bot, Unit* target)
 {
-    TargetWatch& watch = MeleeWatches()[bot->GetGUID().GetCounter()];
+    HpWatch& watch = MeleeWatches()[bot->GetGUID().GetCounter()][target->GetGUID().GetCounter()];
     uint32_t const now = GameTime::GetGameTimeMS();
     uint32_t const health = target->GetHealth();
-    if (watch.guid != target->GetGUID())
+    if (!watch.started)
     {
-        watch.guid = target->GetGUID();
+        watch.started = true;
         watch.health = health;
         watch.since = now;
         return false;
@@ -398,10 +451,12 @@ void EngageHostile(Player* bot, Unit* target, MeleeTrace& trace)
     bot->SetInFront(target);
     trace.swing = SwingFor(bot, target);
     trace.los = bot->IsWithinLOSInMap(target);
+    trace.attackBlock = AttackBlockReason(bot, target);
     trace.validAttack = bot->IsValidAttackTarget(target);
     if (!trace.validAttack)
     {
         TryMarkAtWar(bot, target);
+        trace.attackBlock = AttackBlockReason(bot, target);
         trace.validAttack = bot->IsValidAttackTarget(target);
     }
     SwingAction action = ChooseSwing(trace.swing);
@@ -453,8 +508,15 @@ bool RecoverOwnedBot(Player* bot)
 {
     bool const ghost = bot->HasPlayerFlag(PLAYER_FLAGS_GHOST);
     bool const alive = bot->IsAlive();
+    // A seek step left POINT or CHASE running. That generator blocks the corpse walk.
+    static std::unordered_set<uint64_t> motionCleared;
     if (alive && !ghost)
+    {
+        motionCleared.erase(bot->GetGUID().GetCounter());
         return false;
+    }
+    if (motionCleared.insert(bot->GetGUID().GetCounter()).second)
+        bot->GetMotionMaster()->Clear();
 
     WorldLocation const& stored = bot->GetCorpseLocation();
     bool const storedHere = bot->HasCorpse() && stored.GetMapId() == bot->GetMapId();
@@ -493,6 +555,8 @@ bool RecoverOwnedBot(Player* bot)
             bot->SpawnCorpseBones();
             return true;
         case RecoveryKind::WalkToCorpse:
+            if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE)
+                bot->GetMotionMaster()->Clear();
             if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
                 WalkLocalStep(bot, stored.GetPositionX(), stored.GetPositionY());
             return true;
@@ -595,7 +659,6 @@ std::list<Creature*> CollectCreatures(Player* bot, float range, ScanStats& stats
     map->LoadGridsInRange(bot->GetPositionX(), bot->GetPositionY(), range);
     stats.gridLoaded = map->IsGridLoaded(*bot);
     FindCreatureOptions options;
-    options.IgnorePhases = true;
     options.IsAlive = alive;
     std::list<Creature*> creatures;
     bot->GetCreatureListWithOptionsInGrid(creatures, range, options);
@@ -728,13 +791,15 @@ void DebugDecision(Player const* bot, char const* state, char const* reason, Uni
         bot->HasPlayerFlag(PLAYER_FLAGS_GHOST), corpseDistance,
         scan && scan->gridLoaded ? 1 : 0, scan ? scan->raw : 0, scan ? scan->kept : 0, scan ? scan->refused : 0,
         previous.suppressed);
+    if (bot->m_homebind.GetMapId() == bot->GetMapId())
+        line += Trinity::StringFormat(" anchorDist={:.1f} leash={:.0f}", bot->GetExactDist2d(bot->m_homebind.GetPositionX(), bot->m_homebind.GetPositionY()), WanderLeashYards);
     if (melee && target)
     {
         Unit const* victim = bot->GetVictim();
         line += Trinity::StringFormat(
-            " attackTimer={} ready={} inMeleeRange={} inArc={} validAttack={} los={} victim={} meleeState={} moving={} targetHp={}/{} botHp={}/{} botCombat={} targetCombat={} minDmg={:.2f} maxDmg={:.2f} attacked={} swingCalled={} orient={:.3f}",
+            " attackTimer={} ready={} inMeleeRange={} inArc={} validAttack={} attackBlock={} los={} victim={} meleeState={} moving={} targetHp={}/{} botHp={}/{} botCombat={} targetCombat={} minDmg={:.2f} maxDmg={:.2f} attacked={} swingCalled={} orient={:.3f}",
             melee->swing.attackTimer, melee->swing.attackReady ? 1 : 0, melee->swing.inMeleeRange ? 1 : 0, melee->swing.inArc ? 1 : 0,
-            melee->validAttack ? 1 : 0, melee->los ? 1 : 0, victim ? victim->GetGUID().ToString() : "none",
+            melee->validAttack ? 1 : 0, melee->attackBlock ? melee->attackBlock : "", melee->los ? 1 : 0, victim ? victim->GetGUID().ToString() : "none",
             bot->HasUnitState(UNIT_STATE_MELEE_ATTACKING) ? 1 : 0, bot->HasUnitState(UNIT_STATE_MOVING) ? 1 : 0,
             target->GetHealth(), target->GetMaxHealth(), bot->GetHealth(), bot->GetMaxHealth(),
             bot->IsInCombat() ? 1 : 0, target->IsInCombat() ? 1 : 0, melee->minDamage, melee->maxDamage,
@@ -744,6 +809,24 @@ void DebugDecision(Player const* bot, char const* state, char const* reason, Uni
         TC_LOG_INFO("playerbot", "{}", line);
     else
         TC_LOG_INFO("server.worldserver", "playerbot {}", line);
+}
+
+void EnsureWorldPhase(Player* bot)
+{
+    uint32 zone = 0;
+    uint32 area = 0;
+    bot->GetMap()->GetZoneAndAreaId(bot->GetPhaseShift(), zone, area, *bot);
+    static std::unordered_map<uint64_t, uint32> appliedArea;
+    uint32& previous = appliedArea[bot->GetGUID().GetCounter()];
+    if (previous == area && area != 0)
+        return;
+    previous = area;
+    // Same server-side calls as SendInitialPacketsAfterAddToMap. Packets are dropped for a bot,
+    // but the phase shift, zone, and visibility updates still have to run after the grid exists.
+    PhasingHandler::OnMapChange(bot);
+    if (zone || area)
+        bot->UpdateZone(zone, area);
+    bot->UpdateObjectVisibility(false);
 }
 
 void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
@@ -771,6 +854,7 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
             continue;
         }
         ++steps;
+        EnsureWorldPhase(bot);
         if (RecoverOwnedBot(bot))
         {
             DebugDecision(bot, bot->HasPlayerFlag(PLAYER_FLAGS_GHOST) ? "ghost" : "dead",
@@ -989,7 +1073,6 @@ std::list<Creature*> LiveEntries(Player* bot, float range, uint32 entry)
 {
     bot->GetMap()->LoadGridsInRange(bot->GetPositionX(), bot->GetPositionY(), range);
     FindCreatureOptions options;
-    options.IgnorePhases = true;
     options.IsAlive = FindCreatureAliveState::Alive;
     options.CreatureId = entry;
     std::list<Creature*> creatures;
@@ -1001,7 +1084,6 @@ std::list<GameObject*> LiveObjects(Player* bot, float range, uint32 entry)
 {
     bot->GetMap()->LoadGridsInRange(bot->GetPositionX(), bot->GetPositionY(), range);
     FindGameObjectOptions options;
-    options.IgnorePhases = true;
     options.GameObjectId = entry;
     std::list<GameObject*> objects;
     bot->GetGameObjectListWithOptionsInGrid(objects, range, options);
