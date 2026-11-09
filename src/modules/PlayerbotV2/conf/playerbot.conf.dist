@@ -33,9 +33,10 @@ Playerbot.PvP = 0
 
 # 1 logs a decision about every 400ms. Identical lines are sampled (first, then every 8th).
 # The scan line includes grid, raw, kept, and refused counts from a phase-ignoring grid scan.
-# Each refused candidate also logs entry, level, faction template, unit flags, npc flags,
-# alive, reaction, hostile, friendly, distance, and the refuse reason, plus a reason histogram.
+# Each refused candidate also logs name, entry, level, faction template, unit flags, npc flags,
+# alive, reaction, hostile, friendly, distance, the refuse reason, and whether that template is friendly.
 # Quest-giver candidates log the same fields and CanTakeQuest per offered quest.
+# Held objectives are sought to 120 yards, prey to 80, and idle wandering stays inside a 150-yard bind leash.
 # Also add to worldserver.conf: Logger.playerbot=3,Console Server
 Playerbot.Debug = 0
 

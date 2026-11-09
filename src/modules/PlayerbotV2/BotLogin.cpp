@@ -267,10 +267,19 @@ bool WalkLocalStep(Player* bot, float towardX, float towardY)
     if (motion == POINT_MOTION_TYPE || motion == CHASE_MOTION_TYPE)
         return false;
     G3D::Vector3 point;
-    if (!PathFirstStep(bot, towardX, towardY, bot->GetPositionZ(), point))
+    // A full path to a far wolf can fail. An 8-yard hop toward that point still moves.
+    if (!PathFirstStep(bot, towardX, towardY, bot->GetPositionZ(), point) && !EvaluateLocalStep(bot, towardX, towardY, point))
         return false;
     bot->GetMotionMaster()->MovePoint(1, point.x, point.y, point.z);
     return true;
+}
+
+bool MoveToward(Player* bot, float towardX, float towardY)
+{
+    MovementGeneratorType const motion = bot->GetMotionMaster()->GetCurrentMovementGeneratorType();
+    if (motion == POINT_MOTION_TYPE || motion == CHASE_MOTION_TYPE)
+        return true;
+    return WalkLocalStep(bot, towardX, towardY);
 }
 
 void EngageHostile(Player* bot, Unit* target)
@@ -399,18 +408,22 @@ void WritePlayerbotLine(std::string const& line)
         TC_LOG_INFO("server.worldserver", "playerbot {}", line);
 }
 
-void DebugRefuseCandidate(Player const* bot, HostileFacts const& facts)
+void DebugRefuseCandidate(Player const* bot, Unit const* unit, HostileFacts const& facts)
 {
     if (!PlayerbotDebug() || !bot)
         return;
-    std::string const signature = Trinity::StringFormat("refuse|{}|{}|{}", facts.entry, facts.factionTemplate, HostileRefuseReason(facts));
+    char const* const reason = HostileRefuseReason(facts);
+    char const* note = "refused";
+    if (reason && std::string_view(reason) == "not-hostile")
+        note = (facts.templateFriendly || facts.friendlyTo) ? "friendly-template" : "not-prey";
+    std::string const signature = Trinity::StringFormat("refuse|{}|{}|{}", facts.entry, facts.factionTemplate, reason ? reason : "");
     if (!DebugDue(bot->GetGUID().GetCounter(), signature))
         return;
     WritePlayerbotLine(Trinity::StringFormat(
-        "bot {} {} refuse entry={} level={} faction={} unitFlags={} npcFlags={} alive={} reaction={} hostile={} friendly={} hostileFrom={} friendlyFrom={} dist={:.1f} reason={}",
-        bot->GetName(), bot->GetGUID().ToString(), facts.entry, facts.level, facts.factionTemplate, facts.unitFlags, facts.npcFlags,
-        facts.alive ? 1 : 0, facts.reaction, facts.hostileTo ? 1 : 0, facts.friendlyTo ? 1 : 0, facts.hostileFrom ? 1 : 0,
-        facts.friendlyFrom ? 1 : 0, facts.distance, HostileRefuseReason(facts)));
+        "bot {} {} refuse name=\"{}\" entry={} level={} faction={} unitFlags={} npcFlags={} alive={} reaction={} hostile={} friendly={} hostileFrom={} friendlyFrom={} templateFriendly={} dist={:.1f} reason={} note={}",
+        bot->GetName(), bot->GetGUID().ToString(), unit ? unit->GetName() : std::string(), facts.entry, facts.level, facts.factionTemplate,
+        facts.unitFlags, facts.npcFlags, facts.alive ? 1 : 0, facts.reaction, facts.hostileTo ? 1 : 0, facts.friendlyTo ? 1 : 0,
+        facts.hostileFrom ? 1 : 0, facts.friendlyFrom ? 1 : 0, facts.templateFriendly ? 1 : 0, facts.distance, reason ? reason : "", note));
 }
 
 void DebugQuestOffer(Player const* bot, HostileFacts const& facts, uint32_t questId, char const* reason, bool canTake, bool canAdd)
@@ -478,17 +491,17 @@ Unit* SelectHostile(Player* bot, Player* leader, bool pvpEnabled, ScanStats& sta
             return victim;
 
     Unit* nearest = nullptr;
-    float nearestDist = AcquireYards + 1.0f;
-    for (Creature* creature : CollectCreatures(bot, AcquireYards, stats))
+    float nearestDist = PreySeekYards + 1.0f;
+    for (Creature* creature : CollectCreatures(bot, PreySeekYards, stats))
     {
         if (!creature || creature->GetGUID() == bot->GetGUID())
             continue;
         HostileFacts const facts = FactsFor(bot, creature, pvpEnabled);
-        if (JudgeHostile(facts) == HostileUse::Refuse)
+        if (JudgeHostile(facts, PreySeekYards) == HostileUse::Refuse)
         {
             ++stats.refused;
             AccumulateRefuse(stats.reasons, HostileRefuseReason(facts));
-            DebugRefuseCandidate(bot, facts);
+            DebugRefuseCandidate(bot, creature, facts);
             continue;
         }
         ++stats.kept;
@@ -516,16 +529,18 @@ Unit* SelectHostile(Player* bot, Player* leader, bool pvpEnabled, ScanStats& sta
 }
 
 bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget);
+bool DiscoverQuestOffer(Player* bot, bool pvpEnabled);
+bool WanderInsideLeash(Player* bot);
 void TryLootQuestItems(Player* bot, Unit* target);
 
-void DebugDecision(Player const* bot, char const* state, char const* reason, Unit const* target, ScanStats const* scan)
+void DebugDecision(Player const* bot, char const* state, char const* reason, Unit const* target, ScanStats const* scan, uint32_t seekEntry = 0)
 {
     if (!sConfigMgr->GetBoolDefault("Playerbot.Debug"sv, false) || !bot)
         return;
     float corpseDistance = -1.0f;
     if (bot->HasCorpse() && bot->GetCorpseLocation().GetMapId() == bot->GetMapId())
         corpseDistance = bot->GetExactDist(bot->GetCorpseLocation());
-    uint32_t const entry = target && target->GetTypeId() == TYPEID_UNIT ? target->GetEntry() : 0;
+    uint32_t const entry = target && target->GetTypeId() == TYPEID_UNIT ? target->GetEntry() : seekEntry;
     uint32_t const level = target ? target->GetLevel() : 0;
     std::string const signature = Trinity::StringFormat("{}|{}|{}|{}|{}", state, reason ? reason : "", entry,
         scan ? scan->raw : 0, scan && scan->gridLoaded ? 1 : 0);
@@ -616,33 +631,43 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
 
         ScanStats scan;
         Unit* target = questTarget ? questTarget : SelectHostile(bot, leader, pvpEnabled, scan);
-        if (!target)
+        if (target && bot->GetDistance(target) > MeleeReachYards)
         {
-            DebugDecision(bot, "idle", scan.gridLoaded ? "no-legal-target" : "grid-not-loaded", nullptr, &scan);
-            continue;
-        }
-        HostileFacts const facts = FactsFor(bot, target, pvpEnabled);
-        HostileUse const use = JudgeHostile(facts);
-        if (use == HostileUse::Melee || use == HostileUse::Approach)
-        {
-            if (use == HostileUse::Melee)
+            if (MoveToward(bot, target->GetPositionX(), target->GetPositionY()))
             {
-                if (uint32_t spellId = FindKnownHarmfulSpell(bot, target))
+                DebugDecision(bot, "seek", "prey", target, &scan);
+                continue;
+            }
+            target = questTarget ? target : nullptr;
+        }
+        if (target)
+        {
+            HostileFacts const facts = FactsFor(bot, target, pvpEnabled);
+            if (uint32_t spellId = FindKnownHarmfulSpell(bot, target))
+            {
+                SpellCastResult const cast = bot->CastSpell(CastSpellTargetArg(target), spellId);
+                if (cast == SPELL_CAST_OK)
                 {
-                    SpellCastResult const cast = bot->CastSpell(CastSpellTargetArg(target), spellId);
-                    if (cast == SPELL_CAST_OK)
-                    {
-                        DebugDecision(bot, "spell", "cast", target, &scan);
-                        continue;
-                    }
+                    DebugDecision(bot, "spell", "cast", target, &scan);
+                    continue;
                 }
             }
             EngageHostile(bot, target);
             TryLootQuestItems(bot, target);
-            DebugDecision(bot, use == HostileUse::Melee ? "melee" : "chase", HostileRefuseReason(facts), target, &scan);
+            DebugDecision(bot, "melee", HostileRefuseReason(facts), target, &scan);
+            continue;
         }
-        else
-            DebugDecision(bot, "refused", HostileRefuseReason(facts), target, &scan);
+        if (DiscoverQuestOffer(bot, pvpEnabled))
+        {
+            DebugDecision(bot, "seek", "quest-offer", nullptr, &scan);
+            continue;
+        }
+        if (WanderInsideLeash(bot))
+        {
+            DebugDecision(bot, "wander", "leash", nullptr, &scan);
+            continue;
+        }
+        DebugDecision(bot, "idle", scan.gridLoaded ? "no-legal-target" : "grid-not-loaded", nullptr, &scan);
     }
 }
 
@@ -709,28 +734,210 @@ void TryLootQuestItems(Player* bot, Unit* target)
     }
 }
 
+struct SpawnSpot
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
+std::unordered_map<uint64_t, std::vector<SpawnSpot>> const& SpawnIndex(bool creatures)
+{
+    static std::unordered_map<uint64_t, std::vector<SpawnSpot>> creatureIndex;
+    static std::unordered_map<uint64_t, std::vector<SpawnSpot>> objectIndex;
+    static bool built = false;
+    if (!built)
+    {
+        built = true;
+        for (auto const& node : sObjectMgr->GetAllCreatureData())
+        {
+            CreatureData const& data = node.second;
+            if (data.mapId == MAPID_INVALID || data.id == 0)
+                continue;
+            creatureIndex[(uint64_t(data.mapId) << 32) | data.id].push_back(
+                { data.spawnPoint.GetPositionX(), data.spawnPoint.GetPositionY(), data.spawnPoint.GetPositionZ() });
+        }
+        for (auto const& node : sObjectMgr->GetAllGameObjectData())
+        {
+            GameObjectData const& data = node.second;
+            if (data.mapId == MAPID_INVALID || data.id == 0)
+                continue;
+            objectIndex[(uint64_t(data.mapId) << 32) | data.id].push_back(
+                { data.spawnPoint.GetPositionX(), data.spawnPoint.GetPositionY(), data.spawnPoint.GetPositionZ() });
+        }
+    }
+    return creatures ? creatureIndex : objectIndex;
+}
+
+bool NearestSpawn(bool creatures, uint32 mapId, uint32 entry, float x, float y, float& outX, float& outY, float& outZ, float& outDistance)
+{
+    auto const& index = SpawnIndex(creatures);
+    auto found = index.find((uint64_t(mapId) << 32) | entry);
+    if (found == index.end())
+        return false;
+    bool any = false;
+    for (SpawnSpot const& spot : found->second)
+    {
+        float const dx = spot.x - x;
+        float const dy = spot.y - y;
+        float const distance = std::sqrt(dx * dx + dy * dy);
+        if (!any || distance < outDistance)
+        {
+            any = true;
+            outDistance = distance;
+            outX = spot.x;
+            outY = spot.y;
+            outZ = spot.z;
+        }
+    }
+    return any;
+}
+
+std::list<Creature*> LiveEntries(Player* bot, float range, uint32 entry)
+{
+    bot->GetMap()->LoadGridsInRange(bot->GetPositionX(), bot->GetPositionY(), range);
+    FindCreatureOptions options;
+    options.IgnorePhases = true;
+    options.IsAlive = FindCreatureAliveState::Alive;
+    options.CreatureId = entry;
+    std::list<Creature*> creatures;
+    bot->GetCreatureListWithOptionsInGrid(creatures, range, options);
+    return creatures;
+}
+
+std::list<GameObject*> LiveObjects(Player* bot, float range, uint32 entry)
+{
+    bot->GetMap()->LoadGridsInRange(bot->GetPositionX(), bot->GetPositionY(), range);
+    FindGameObjectOptions options;
+    options.IgnorePhases = true;
+    options.GameObjectId = entry;
+    std::list<GameObject*> objects;
+    bot->GetGameObjectListWithOptionsInGrid(objects, range, options);
+    return objects;
+}
+
+struct Destination
+{
+    Creature* creature = nullptr;
+    GameObject* object = nullptr;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float distance = 0.0f;
+    uint32 entry = 0;
+    bool known = false;
+    bool kill = false;
+    bool talk = false;
+    bool objectUse = false;
+};
+
+void NoteCreature(Player* bot, Destination& best, Creature* creature, bool kill, bool talk)
+{
+    if (!creature)
+        return;
+    float const distance = bot->GetDistance(creature);
+    if (best.known && distance >= best.distance)
+        return;
+    best.creature = creature;
+    best.object = nullptr;
+    best.x = creature->GetPositionX();
+    best.y = creature->GetPositionY();
+    best.z = creature->GetPositionZ();
+    best.distance = distance;
+    best.entry = creature->GetEntry();
+    best.known = true;
+    best.kill = kill;
+    best.talk = talk;
+    best.objectUse = false;
+}
+
+void NoteObject(Player* bot, Destination& best, GameObject* object)
+{
+    if (!object)
+        return;
+    float const distance = bot->GetDistance(object);
+    if (best.known && distance >= best.distance)
+        return;
+    best.creature = nullptr;
+    best.object = object;
+    best.x = object->GetPositionX();
+    best.y = object->GetPositionY();
+    best.z = object->GetPositionZ();
+    best.distance = distance;
+    best.entry = object->GetEntry();
+    best.known = true;
+    best.kill = false;
+    best.talk = false;
+    best.objectUse = true;
+}
+
+void NoteSpawn(Destination& best, float x, float y, float z, float distance, uint32 entry, bool kill, bool talk, bool objectUse)
+{
+    if (best.known && distance >= best.distance)
+        return;
+    best.creature = nullptr;
+    best.object = nullptr;
+    best.x = x;
+    best.y = y;
+    best.z = z;
+    best.distance = distance;
+    best.entry = entry;
+    best.known = true;
+    best.kill = kill;
+    best.talk = talk;
+    best.objectUse = objectUse;
+}
+
+struct TravelMemory
+{
+    float angle = 0.4f;
+    bool anchorSet = false;
+    float anchorX = 0.0f;
+    float anchorY = 0.0f;
+};
+
+TravelMemory& MemoryFor(Player* bot)
+{
+    static std::unordered_map<uint64_t, TravelMemory> memory;
+    TravelMemory& item = memory[bot->GetGUID().GetCounter()];
+    if (!item.anchorSet)
+    {
+        item.anchorSet = true;
+        if (bot->m_homebind.GetMapId() == bot->GetMapId())
+        {
+            item.anchorX = bot->m_homebind.GetPositionX();
+            item.anchorY = bot->m_homebind.GetPositionY();
+        }
+        else
+        {
+            item.anchorX = bot->GetPositionX();
+            item.anchorY = bot->GetPositionY();
+        }
+    }
+    return item;
+}
+
+bool WanderInsideLeash(Player* bot)
+{
+    TravelMemory& memory = MemoryFor(bot);
+    SeekFacts facts;
+    facts.anchorDistance = bot->GetExactDist2d(memory.anchorX, memory.anchorY);
+    if (ChooseSeek(facts) == SeekAction::ReturnToLeash)
+        return MoveToward(bot, memory.anchorX, memory.anchorY);
+    float x = 0.0f;
+    float y = 0.0f;
+    LeashedStep(memory.anchorX, memory.anchorY, bot->GetPositionX(), bot->GetPositionY(), memory.angle, WanderStepYards, WanderLeashYards, x, y);
+    if (MoveToward(bot, x, y))
+        return true;
+    memory.angle += 0.9f;
+    LeashedStep(memory.anchorX, memory.anchorY, bot->GetPositionX(), bot->GetPositionY(), memory.angle, WanderStepYards, WanderLeashYards, x, y);
+    return MoveToward(bot, x, y);
+}
+
 bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
 {
     combatTarget = nullptr;
-
-    auto nearestInvolved = [&](uint32_t questId) -> Creature*
-    {
-        Creature* nearest = nullptr;
-        float nearestDist = AcquireYards + 1.0f;
-        ScanStats ignored;
-        for (Creature* creature : CollectCreatures(bot, AcquireYards, ignored))
-        {
-            if (!sObjectMgr->GetCreatureQuestInvolvedRelations(creature->GetEntry()).HasQuest(questId))
-                continue;
-            float const distance = bot->GetDistance(creature);
-            if (distance < nearestDist)
-            {
-                nearest = creature;
-                nearestDist = distance;
-            }
-        }
-        return nearest;
-    };
+    Destination best;
 
     for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
     {
@@ -740,20 +947,56 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
         Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
         if (!quest || bot->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
             continue;
-        Creature* giver = nearestInvolved(questId);
-        if (!giver)
+        Destination ender;
+        for (auto const& relation : sObjectMgr->GetCreatureQuestInvolvedRelationReverseBounds(questId))
+        {
+            uint32 const entry = relation.second;
+            bool live = false;
+            for (Creature* creature : LiveEntries(bot, GiverSeekYards, entry))
+            {
+                NoteCreature(bot, ender, creature, false, false);
+                live = true;
+            }
+            if (live)
+                continue;
+            float x = 0.0f, y = 0.0f, z = 0.0f, distance = 1.0e9f;
+            if (NearestSpawn(true, bot->GetMapId(), entry, bot->GetPositionX(), bot->GetPositionY(), x, y, z, distance))
+                NoteSpawn(ender, x, y, z, distance, entry, false, false, false);
+        }
+        for (auto const& relation : sObjectMgr->GetGOQuestInvolvedRelationReverseBounds(questId))
+        {
+            uint32 const entry = relation.second;
+            bool live = false;
+            for (GameObject* object : LiveObjects(bot, GiverSeekYards, entry))
+            {
+                NoteObject(bot, ender, object);
+                live = true;
+            }
+            if (live)
+                continue;
+            float x = 0.0f, y = 0.0f, z = 0.0f, distance = 1.0e9f;
+            if (NearestSpawn(false, bot->GetMapId(), entry, bot->GetPositionX(), bot->GetPositionY(), x, y, z, distance))
+                NoteSpawn(ender, x, y, z, distance, entry, false, false, true);
+        }
+        if (!ender.known)
             continue;
         bool const choice = quest->GetRewChoiceItemsCount() > 0;
         bool const canReward = bot->CanRewardQuest(quest, false) && bot->CanRewardQuest(quest, LootItemType::Item, 0, false);
-        if (!MayTurnInQuest(true, canReward, true, choice))
-            continue;
-        if (bot->GetDistance(giver) > INTERACTION_DISTANCE)
+        if (ender.creature && ender.distance <= INTERACTION_DISTANCE && MayTurnInQuest(true, canReward, true, choice))
         {
-            WalkLocalStep(bot, giver->GetPositionX(), giver->GetPositionY());
+            bot->RewardQuest(quest, LootItemType::Item, 0, ender.creature, true);
             return true;
         }
-        bot->RewardQuest(quest, LootItemType::Item, 0, giver, true);
-        return true;
+        if (ender.object && ender.distance <= INTERACTION_DISTANCE)
+        {
+            ender.object->Use(bot);
+            return true;
+        }
+        if (MoveToward(bot, ender.x, ender.y))
+        {
+            DebugDecision(bot, "seek", "turn-in", ender.creature, nullptr, ender.entry);
+            return true;
+        }
     }
 
     for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
@@ -766,17 +1009,15 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
             continue;
         for (QuestObjective const& objective : quest->GetObjectives())
         {
+            if (objective.ObjectID <= 0)
+                continue;
             if (objective.Amount > 0 && bot->GetQuestObjectiveData(objective) >= objective.Amount)
                 continue;
-            ObjectiveSupport const support = ClassifyObjective(objective.Type);
-            if (support == ObjectiveSupport::Unsupported || PlanObjective(objective.Type, objective.ObjectID > 0, true) == ObjectivePlan::Skip)
-                continue;
-            if (support == ObjectiveSupport::Item)
+            if (ClassifyObjective(objective.Type) == ObjectiveSupport::Item)
             {
                 ScanStats ignoredDead;
-                std::list<Creature*> corpses = CollectCreatures(bot, INTERACTION_DISTANCE, ignoredDead, FindCreatureAliveState::Dead);
                 bool looted = false;
-                for (Creature* creature : corpses)
+                for (Creature* creature : CollectCreatures(bot, INTERACTION_DISTANCE, ignoredDead, FindCreatureAliveState::Dead))
                 {
                     uint8_t const before = creature->m_loot ? uint8_t(std::min<size_t>(creature->m_loot->items.size(), 16)) : 0;
                     TryLootQuestItems(bot, creature);
@@ -787,104 +1028,81 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
                     return true;
                 continue;
             }
-            if (support == ObjectiveSupport::Talk && objective.ObjectID > 0)
+            if (!ObjectiveNeedsSeek(objective.Type))
+                continue;
+            uint32 const entry = uint32(objective.ObjectID);
+            ObjectiveSupport const support = ClassifyObjective(objective.Type);
+            if (support == ObjectiveSupport::GameObject)
             {
-                ScanStats ignoredTalk;
-                std::list<Creature*> speakers = CollectCreatures(bot, AcquireYards, ignoredTalk);
-                speakers.remove_if([entry = uint32_t(objective.ObjectID)](Creature* creature) { return creature->GetEntry() != entry; });
-                Creature* speaker = nullptr;
-                float speakerDist = AcquireYards + 1.0f;
-                for (Creature* creature : speakers)
+                bool live = false;
+                for (GameObject* object : LiveObjects(bot, ObjectiveSeekYards, entry))
                 {
-                    float const distance = bot->GetDistance(creature);
-                    if (distance < speakerDist)
-                    {
-                        speaker = creature;
-                        speakerDist = distance;
-                    }
+                    NoteObject(bot, best, object);
+                    live = true;
                 }
-                if (!speaker)
-                    continue;
-                if (speakerDist > INTERACTION_DISTANCE)
+                if (!live)
                 {
-                    WalkLocalStep(bot, speaker->GetPositionX(), speaker->GetPositionY());
-                    return true;
+                    float x = 0.0f, y = 0.0f, z = 0.0f, distance = 1.0e9f;
+                    if (NearestSpawn(false, bot->GetMapId(), entry, bot->GetPositionX(), bot->GetPositionY(), x, y, z, distance))
+                        NoteSpawn(best, x, y, z, distance, entry, false, false, true);
                 }
-                bot->TalkedToCreature(speaker->GetEntry(), speaker->GetGUID());
-                return true;
+                continue;
             }
-            if (support == ObjectiveSupport::Kill && objective.ObjectID > 0)
+            bool const kill = support == ObjectiveSupport::Kill;
+            bool sawLive = false;
+            bool accepted = false;
+            for (Creature* creature : LiveEntries(bot, ObjectiveSeekYards, entry))
             {
-                ScanStats ignoredKill;
-                std::list<Creature*> creatures = CollectCreatures(bot, AcquireYards, ignoredKill);
-                creatures.remove_if([entry = uint32_t(objective.ObjectID)](Creature* creature) { return creature->GetEntry() != entry; });
-                Creature* nearest = nullptr;
-                float nearestDist = AcquireYards + 1.0f;
-                for (Creature* creature : creatures)
-                {
-                    if (JudgeHostile(FactsFor(bot, creature, pvpEnabled)) == HostileUse::Refuse)
-                        continue;
-                    float const distance = bot->GetDistance(creature);
-                    if (distance < nearestDist)
-                    {
-                        nearest = creature;
-                        nearestDist = distance;
-                    }
-                }
-                if (!nearest)
+                sawLive = true;
+                if (kill && JudgeHostile(FactsFor(bot, creature, pvpEnabled), ObjectiveSeekYards) == HostileUse::Refuse)
                     continue;
-                if (PlanObjective(objective.Type, true, true) != ObjectivePlan::Attack)
-                    continue;
-                if (bot->GetDistance(nearest) > MeleeReachYards)
-                {
-                    WalkLocalStep(bot, nearest->GetPositionX(), nearest->GetPositionY());
-                    return true;
-                }
-                combatTarget = nearest;
-                return false;
+                NoteCreature(bot, best, creature, kill, !kill);
+                accepted = true;
             }
-            if (support == ObjectiveSupport::GameObject && objective.ObjectID > 0)
+            if (!accepted && !sawLive)
             {
-                FindGameObjectOptions objectOptions;
-                objectOptions.IgnorePhases = true;
-                objectOptions.GameObjectId = uint32_t(objective.ObjectID);
-                std::list<GameObject*> objects;
-                bot->GetGameObjectListWithOptionsInGrid(objects, AcquireYards, objectOptions);
-                GameObject* nearest = nullptr;
-                float nearestDist = AcquireYards + 1.0f;
-                for (GameObject* object : objects)
-                {
-                    float const distance = bot->GetDistance(object);
-                    if (distance < nearestDist)
-                    {
-                        nearest = object;
-                        nearestDist = distance;
-                    }
-                }
-                if (!nearest || PlanObjective(objective.Type, true, false) != ObjectivePlan::UseObject)
-                    continue;
-                if (bot->GetDistance(nearest) > INTERACTION_DISTANCE)
-                {
-                    WalkLocalStep(bot, nearest->GetPositionX(), nearest->GetPositionY());
-                    return true;
-                }
-                nearest->Use(bot);
-                return true;
+                float x = 0.0f, y = 0.0f, z = 0.0f, distance = 1.0e9f;
+                if (NearestSpawn(true, bot->GetMapId(), entry, bot->GetPositionX(), bot->GetPositionY(), x, y, z, distance))
+                    NoteSpawn(best, x, y, z, distance, entry, kill, !kill, false);
             }
         }
     }
 
+    if (!best.known)
+        return false;
+    if (best.kill && best.creature && best.distance <= MeleeReachYards)
+    {
+        combatTarget = best.creature;
+        return false;
+    }
+    if (best.talk && best.creature && best.distance <= INTERACTION_DISTANCE)
+    {
+        bot->TalkedToCreature(best.creature->GetEntry(), best.creature->GetGUID());
+        return true;
+    }
+    if (best.objectUse && best.object && best.distance <= INTERACTION_DISTANCE)
+    {
+        best.object->Use(bot);
+        return true;
+    }
+    if (!MoveToward(bot, best.x, best.y))
+        return false;
+    DebugDecision(bot, "seek", best.kill ? "objective-kill" : (best.talk ? "objective-talk" : "objective-object"), best.creature, nullptr, best.entry);
+    return true;
+}
+
+bool DiscoverQuestOffer(Player* bot, bool pvpEnabled)
+{
     ScanStats ignoredGivers;
-    std::list<Creature*> nearby = CollectCreatures(bot, AcquireYards, ignoredGivers);
     Creature* giver = nullptr;
     Quest const* offer = nullptr;
-    float giverDist = AcquireYards + 1.0f;
+    float giverDist = GiverSeekYards + 1.0f;
     QuestGiverHistogram questHist;
-    for (Creature* creature : nearby)
+    for (Creature* creature : CollectCreatures(bot, GiverSeekYards, ignoredGivers))
     {
-        if (!creature)
+        if (!creature || !creature->HasNpcFlag(UNIT_NPC_FLAG_QUESTGIVER))
             continue;
-        bool const questFlag = creature->HasNpcFlag(UNIT_NPC_FLAG_QUESTGIVER);
+        ++questHist.npcs;
         uint32_t offers = 0;
         for (uint32_t questId : sObjectMgr->GetCreatureQuestRelations(creature->GetEntry()))
         {
@@ -895,7 +1113,7 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
             bool const inLog = bot->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE || bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE || bot->GetQuestStatus(questId) == QUEST_STATUS_FAILED;
             QuestOfferFacts offerFacts;
             offerFacts.alive = creature->IsAlive();
-            offerFacts.questGiver = questFlag;
+            offerFacts.questGiver = true;
             offerFacts.canTake = bot->CanTakeQuest(quest, false);
             offerFacts.canAdd = bot->CanAddQuest(quest, false);
             offerFacts.rewarded = bot->IsQuestRewarded(questId);
@@ -913,24 +1131,17 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
                 giverDist = distance;
             }
         }
-        if (questFlag)
+        if (offers == 0)
         {
-            ++questHist.npcs;
-            if (offers == 0)
-            {
-                ++questHist.noOffer;
-                DebugQuestOffer(bot, FactsFor(bot, creature, pvpEnabled), 0, "no-offer", false, false);
-            }
+            ++questHist.noOffer;
+            DebugQuestOffer(bot, FactsFor(bot, creature, pvpEnabled), 0, "no-offer", false, false);
         }
     }
     DebugQuestHistogram(bot, questHist);
     if (!giver || !offer)
         return false;
-    if (bot->GetDistance(giver) > INTERACTION_DISTANCE)
-    {
-        WalkLocalStep(bot, giver->GetPositionX(), giver->GetPositionY());
-        return true;
-    }
+    if (giverDist > INTERACTION_DISTANCE)
+        return MoveToward(bot, giver->GetPositionX(), giver->GetPositionY());
     bot->AddQuest(offer, giver);
     return true;
 }

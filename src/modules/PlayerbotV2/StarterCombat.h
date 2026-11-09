@@ -24,6 +24,12 @@ namespace Playerbot::V2
 {
 inline constexpr float MeleeReachYards = 5.0f;
 inline constexpr float AcquireYards = 30.0f;
+// A legal wolf just outside the engage radius is still worth a walk.
+inline constexpr float ObjectiveSeekYards = 120.0f;
+inline constexpr float PreySeekYards = 80.0f;
+inline constexpr float GiverSeekYards = 120.0f;
+inline constexpr float WanderLeashYards = 150.0f;
+inline constexpr float WanderStepYards = 12.0f;
 inline constexpr float FollowMinYards = 8.0f;
 inline constexpr float FollowMaxYards = 40.0f;
 // Starter beasts are often a few levels above a new character. Elites far above this stay refused.
@@ -138,7 +144,7 @@ enum class HostileUse : uint8_t
     Approach
 };
 
-inline HostileUse JudgeHostile(HostileFacts const& facts)
+inline HostileUse JudgeHostile(HostileFacts const& facts, float approachYards = AcquireYards)
 {
     // CIVILIAN (template extra flag 0x2) is not a combat ban. Rockjaw troggs carry it and are prey.
     // Classic starter beasts are neutral on the faction template (no enemy mask), and a clientless
@@ -166,9 +172,29 @@ inline HostileUse JudgeHostile(HostileFacts const& facts)
         return HostileUse::Refuse;
     if (facts.distance <= MeleeReachYards)
         return HostileUse::Melee;
-    if (facts.distance <= AcquireYards)
+    if (facts.distance <= approachYards)
         return HostileUse::Approach;
     return HostileUse::Refuse;
+}
+
+// Nearest creature that is still legal prey inside approachYards. Friendly guards and critters are skipped.
+inline int32_t ChoosePreyIndex(HostileFacts const* facts, std::size_t count, float approachYards)
+{
+    int32_t best = -1;
+    float bestDistance = approachYards + 1.0f;
+    if (!facts)
+        return best;
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        if (JudgeHostile(facts[i], approachYards) == HostileUse::Refuse)
+            continue;
+        if (facts[i].distance < bestDistance)
+        {
+            best = int32_t(i);
+            bestDistance = facts[i].distance;
+        }
+    }
+    return best;
 }
 
 inline char const* HostileRefuseReason(HostileFacts const& facts)

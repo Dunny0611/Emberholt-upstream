@@ -39,7 +39,17 @@ using Playerbot::V2::FormatRefuseHistogram;
 using Playerbot::V2::HostileFacts;
 using Playerbot::V2::HostileRefuseReason;
 using Playerbot::V2::HostileUse;
+using Playerbot::V2::ChoosePreyIndex;
+using Playerbot::V2::ChooseSeek;
 using Playerbot::V2::JudgeHostile;
+using Playerbot::V2::LeashedStep;
+using Playerbot::V2::MapSpawn;
+using Playerbot::V2::NearestSpawnIndex;
+using Playerbot::V2::ObjectiveNeedsSeek;
+using Playerbot::V2::PreySeekYards;
+using Playerbot::V2::SeekAction;
+using Playerbot::V2::SeekFacts;
+using Playerbot::V2::WanderLeashYards;
 using Playerbot::V2::MayOfferQuest;
 using Playerbot::V2::NoteQuestOffer;
 using Playerbot::V2::NpcFlagNonCombatService;
@@ -590,6 +600,94 @@ TEST_CASE("Classic starter beasts stay eligible when reaction and attack checks 
     NoteQuestOffer(quests, "cannot-take");
     quests.npcs = 2;
     CHECK(FormatQuestGiverHistogram(quests) == "npcs=2 offers=2 canTake=1 cannotTake=1 noOffer=0");
+}
+
+TEST_CASE("A wolf outside 30 yards is sought, and friendly guards stay refused", "[PlayerbotCreation]")
+{
+    FactionTemplateFacts const alliance = ClassicTemplate(1, 1, 72, 3, 2, 12);
+    FactionTemplateFacts const horde = ClassicTemplate(2, 2, 72, 5, 4, 10);
+    FactionTemplateFacts const ironforgeGuard = ClassicTemplate(57, 47, 2081, 3, 2, 12);
+    FactionTemplateFacts const orgrimmarGuard = ClassicTemplate(85, 76, 2081, 5, 4, 10);
+    FactionTemplateFacts wolfFaction = ClassicTemplate(32, 29, 16, 0, 0, 0, 0);
+    wolfFaction.enemies[0] = 28;
+
+    HostileFacts mountaineer = ClassicCreature(853, 55, 0, 4096, false, ironforgeGuard, alliance);
+    mountaineer.distance = 8.0f;
+    CHECK(JudgeHostile(mountaineer) == HostileUse::Refuse);
+    CHECK(std::string_view(HostileRefuseReason(mountaineer)) == "not-hostile");
+    CHECK(mountaineer.templateFriendly);
+
+    HostileFacts denGrunt = ClassicCreature(5952, 55, 0, 36864, false, orgrimmarGuard, horde);
+    denGrunt.distance = 8.0f;
+    CHECK(JudgeHostile(denGrunt) == HostileUse::Refuse);
+    CHECK(std::string_view(HostileRefuseReason(denGrunt)) == "not-hostile");
+    CHECK(denGrunt.templateFriendly);
+
+    HostileFacts wolf = ClassicCreature(705, 1, 0, 0, true, wolfFaction, alliance);
+    wolf.distance = 47.0f;
+    CHECK(JudgeHostile(wolf) == HostileUse::Refuse);
+    CHECK(std::string_view(HostileRefuseReason(wolf)) == "level-or-range");
+    CHECK(JudgeHostile(wolf, PreySeekYards) == HostileUse::Approach);
+    CHECK(wolf.neutralPrey);
+
+    HostileFacts nearCritter = wolf;
+    nearCritter.entry = 1;
+    nearCritter.distance = 6.0f;
+    nearCritter.critter = true;
+    HostileFacts const row[3] = { mountaineer, nearCritter, wolf };
+    CHECK(ChoosePreyIndex(row, 3, PreySeekYards) == 2);
+
+    MapSpawn spawns[4];
+    spawns[0] = { 0, 705, 47.0f, 0.0f, 0.0f, true };
+    spawns[1] = { 0, 705, 200.0f, 0.0f, 0.0f, true };
+    spawns[2] = { 1, 705, 10.0f, 0.0f, 0.0f, true };
+    spawns[3] = { 0, 853, 5.0f, 0.0f, 0.0f, false };
+    CHECK(NearestSpawnIndex(spawns, 4, 0, 705, 0.0f, 0.0f, 1000.0f) == 0);
+
+    CHECK(ObjectiveNeedsSeek(0));
+    CHECK(ObjectiveNeedsSeek(2));
+    CHECK(ObjectiveNeedsSeek(3));
+    CHECK_FALSE(ObjectiveNeedsSeek(1));
+
+    SeekFacts seek;
+    seek.objectiveKnown = true;
+    seek.preyKnown = true;
+    seek.preyDistance = 47.0f;
+    CHECK(ChooseSeek(seek) == SeekAction::PathTo);
+    seek.objectiveInRange = true;
+    CHECK(ChooseSeek(seek) == SeekAction::Engage);
+    seek = {};
+    seek.turnInKnown = true;
+    CHECK(ChooseSeek(seek) == SeekAction::PathTo);
+    seek.turnInInRange = true;
+    CHECK(ChooseSeek(seek) == SeekAction::Engage);
+    seek = {};
+    seek.preyKnown = true;
+    seek.preyDistance = 47.0f;
+    CHECK(ChooseSeek(seek) == SeekAction::PathTo);
+    seek.preyInRange = true;
+    seek.preyDistance = 4.0f;
+    CHECK(ChooseSeek(seek) == SeekAction::Engage);
+    seek = {};
+    seek.offerKnown = true;
+    seek.offerDistance = 70.0f;
+    CHECK(ChooseSeek(seek) == SeekAction::PathTo);
+    seek = {};
+    seek.anchorDistance = 20.0f;
+    CHECK(ChooseSeek(seek) == SeekAction::Wander);
+    seek.anchorDistance = WanderLeashYards + 10.0f;
+    CHECK(ChooseSeek(seek) == SeekAction::ReturnToLeash);
+
+    float x = 0.0f;
+    float y = 0.0f;
+    LeashedStep(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 12.0f, WanderLeashYards, x, y);
+    CHECK(x > 11.9f);
+    CHECK(x < 12.1f);
+    CHECK(y > -0.1f);
+    CHECK(y < 0.1f);
+    LeashedStep(0.0f, 0.0f, 140.0f, 0.0f, 0.0f, 20.0f, WanderLeashYards, x, y);
+    CHECK(x > 149.0f);
+    CHECK(x < 151.0f);
 }
 
 TEST_CASE("A class spell is cast only when it is already known, harmful, and in range", "[PlayerbotCreation]")

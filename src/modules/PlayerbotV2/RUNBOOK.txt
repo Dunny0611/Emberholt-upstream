@@ -56,10 +56,18 @@ applies that directory by itself.
    Reputation reaction and IsValidAttackTarget are not the gate: those still
    consult at-war and phase. Quest givers, vendors, and other service NPCs
    stay refused, as do immune unit flags. The creature-template civilian
-   flag does not by itself refuse a target. Playerbot.Debug logs one sampled
-   line per refused candidate (entry, level, faction, flags, reaction,
-   distance, reason) and a reason histogram, and the same for quest givers
-   with the CanTakeQuest result of each offered quest.
+   flag does not by itself refuse a target. Friendly guards stay refused:
+   Coldridge Mountaineer (853, Ironforge template 57) and Den Grunt (5952,
+   Orgrimmar template 85) are not-hostile on purpose. Playerbot.Debug logs
+   one sampled line per refused candidate, including the creature name and
+   whether the template is friendly, plus a reason histogram. Quest givers
+   log CanTakeQuest for each offered quest.
+   Held kill, object, and talk objectives are sought out to 120 yards, then
+   by the nearest spawn of that entry on the same map. A complete quest walks
+   to its ender. With nothing to walk to, legal prey is sought out to 80 yards.
+   If that giver has no new quest, other questgivers are checked out to 120
+   yards. Otherwise the bot walks nav-mesh steps inside a 150-yard leash of
+   its bind point. There is no teleport.
    The bot faces the target, chases into melee range, and swings through the
    normal attack timer. Players are refused unless PvP is 1 and the
    player is the opposite faction. In a group the bot prefers the leader's
@@ -74,14 +82,15 @@ applies that directory by itself.
    walks toward the stored corpse location on a valid path. A spirit healer
    is not used.
 
-6. Starter quests, kill and gameobject only
-   Within 30 yards the bot can accept a quest when CanTakeQuest and
-   CanAddQuest both pass, walk to that giver on a valid path, attack a
-   quest-objective creature that also passes the combat checks, or Use a
-   quest-objective gameobject. Turn-in calls RewardQuest only when the
-   status is complete, the NPC is the involved giver, CanRewardQuest passes,
-   and the quest has no reward choice. Talk-to objectives call
-   TalkedToCreature only when that NPC is within interaction distance.
+6. Starter quests, kill, gameobject, and talk
+   The bot walks to a held kill, object, or talk objective out to 120 yards,
+   or to the nearest spawn of that entry on the same map when the grid search
+   misses. It accepts a quest when CanTakeQuest and CanAddQuest both pass,
+   including questgivers found out to 120 yards after the current giver has
+   nothing new. Turn-in calls RewardQuest only when the status is complete,
+   the NPC is the involved giver, CanRewardQuest passes, and the quest has
+   no reward choice. Talk-to objectives call TalkedToCreature only when that
+   NPC is within interaction distance.
    Item objectives loot an already-generated quest drop; they do not grant
    items. Currency, reputation, and area-trigger objectives are skipped and
    do not stop other fighting. Dungeons are not scripted. No quest was

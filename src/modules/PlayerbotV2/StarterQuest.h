@@ -14,6 +14,10 @@
 #ifndef TRINITY_PLAYERBOT_V2_STARTER_QUEST_H
 #define TRINITY_PLAYERBOT_V2_STARTER_QUEST_H
 
+#include "StarterCombat.h"
+
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -148,6 +152,103 @@ inline ObjectivePlan PlanObjective(uint8_t type, bool entryPresent, bool hostile
             return ObjectivePlan::Skip;
     }
     return ObjectivePlan::Skip;
+}
+
+// Kill, gameobject, and talk objectives have a place to walk to. An item objective does not.
+inline bool ObjectiveNeedsSeek(uint8_t type)
+{
+    ObjectiveSupport const support = ClassifyObjective(type);
+    return support == ObjectiveSupport::Kill || support == ObjectiveSupport::GameObject || support == ObjectiveSupport::Talk;
+}
+
+struct MapSpawn
+{
+    uint32_t mapId = 0;
+    uint32_t entry = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    bool eligible = true;
+};
+
+// Nearest spawn of one entry on one map, inside maxRange. Other maps and ineligible rows are ignored.
+inline int32_t NearestSpawnIndex(MapSpawn const* spawns, std::size_t count, uint32_t mapId, uint32_t entry, float x, float y, float maxRange)
+{
+    int32_t best = -1;
+    float bestDistance = maxRange;
+    if (!spawns)
+        return best;
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        MapSpawn const& spawn = spawns[i];
+        if (!spawn.eligible || spawn.mapId != mapId || spawn.entry != entry)
+            continue;
+        float const dx = spawn.x - x;
+        float const dy = spawn.y - y;
+        float const distance = std::sqrt(dx * dx + dy * dy);
+        if (distance <= maxRange && (best < 0 || distance < bestDistance))
+        {
+            best = int32_t(i);
+            bestDistance = distance;
+        }
+    }
+    return best;
+}
+
+enum class SeekAction : uint8_t
+{
+    None = 0,
+    Engage,
+    PathTo,
+    Wander,
+    ReturnToLeash
+};
+
+struct SeekFacts
+{
+    bool turnInKnown = false;
+    bool turnInInRange = false;
+    bool objectiveKnown = false;
+    bool objectiveInRange = false;
+    bool preyKnown = false;
+    float preyDistance = 0.0f;
+    bool preyInRange = false;
+    bool offerKnown = false;
+    float offerDistance = 0.0f;
+    bool offerInRange = false;
+    float anchorDistance = 0.0f;
+};
+
+// Held turn-ins and supported objectives come first. Prey is the fallback when
+// the log has nothing to walk to. A new quest offer is next. Otherwise wander
+// inside the bind leash, or walk back when the leash is broken.
+inline SeekAction ChooseSeek(SeekFacts const& facts)
+{
+    if (facts.turnInKnown)
+        return facts.turnInInRange ? SeekAction::Engage : SeekAction::PathTo;
+    if (facts.objectiveKnown)
+        return facts.objectiveInRange ? SeekAction::Engage : SeekAction::PathTo;
+    if (facts.preyKnown && facts.preyDistance <= PreySeekYards)
+        return facts.preyInRange ? SeekAction::Engage : SeekAction::PathTo;
+    if (facts.offerKnown && facts.offerDistance <= GiverSeekYards)
+        return facts.offerInRange ? SeekAction::Engage : SeekAction::PathTo;
+    if (facts.anchorDistance > WanderLeashYards)
+        return SeekAction::ReturnToLeash;
+    return SeekAction::Wander;
+}
+
+inline void LeashedStep(float anchorX, float anchorY, float fromX, float fromY, float angle, float step, float leash, float& outX, float& outY)
+{
+    outX = fromX + std::cos(angle) * step;
+    outY = fromY + std::sin(angle) * step;
+    float const dx = outX - anchorX;
+    float const dy = outY - anchorY;
+    float const distance = std::sqrt(dx * dx + dy * dy);
+    if (distance > leash && distance > 0.001f)
+    {
+        outX = anchorX + dx / distance * leash;
+        outY = anchorY + dy / distance * leash;
+    }
 }
 }
 #endif
