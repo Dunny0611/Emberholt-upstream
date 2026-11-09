@@ -10,6 +10,7 @@
 #include "BotLogin.h"
 #include "LifecyclePolicy.h"
 #include "Session/BotSession.h"
+#include "QuestGuide.h"
 #include "StarterCombat.h"
 #include "StarterQuest.h"
 
@@ -74,11 +75,22 @@ struct LiveLogin
 
 std::vector<PendingCreate> g_creates;
 std::vector<LiveLogin> g_logins;
+
+struct QueuedLogin
+{
+    std::shared_ptr<BotSession> session;
+    ObjectGuid character;
+    BotFaction faction = BotFaction::Unknown;
+    uint32_t readyAt = 0;
+};
+
+std::vector<QueuedLogin> g_loginQueue;
 }
 
 bool AcknowledgeBotTeleport(Player* bot);
 bool PlayerbotDebug();
 void WritePlayerbotLine(std::string const& line);
+void AdmitQueuedLogins();
 
 void HoldCreateSession(std::shared_ptr<BotSession> session, std::shared_ptr<bool> finished)
 {
@@ -306,12 +318,34 @@ bool WalkLocalStep(Player* bot, float towardX, float towardY)
     return true;
 }
 
-bool MoveToward(Player* bot, float towardX, float towardY)
+struct PlanAnchor
 {
-    if (bot->m_homebind.GetMapId() == bot->GetMapId())
+    bool set = false;
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+PlanAnchor& AnchorFor(ObjectGuid::LowType guid)
+{
+    static std::unordered_map<uint64_t, PlanAnchor> anchors;
+    return anchors[guid];
+}
+
+void Reanchor(Player* bot, float x, float y)
+{
+    PlanAnchor& plan = AnchorFor(bot->GetGUID().GetCounter());
+    plan.set = true;
+    plan.x = x;
+    plan.y = y;
+}
+
+bool MoveToward(Player* bot, float towardX, float towardY, bool applyLeash = true)
+{
+    if (applyLeash && bot->m_homebind.GetMapId() == bot->GetMapId())
     {
-        float const anchorX = bot->m_homebind.GetPositionX();
-        float const anchorY = bot->m_homebind.GetPositionY();
+        PlanAnchor const& plan = AnchorFor(bot->GetGUID().GetCounter());
+        float const anchorX = plan.set ? plan.x : bot->m_homebind.GetPositionX();
+        float const anchorY = plan.set ? plan.y : bot->m_homebind.GetPositionY();
         float const dx = towardX - anchorX;
         float const dy = towardY - anchorY;
         float const destDistance = std::sqrt(dx * dx + dy * dy);
@@ -803,6 +837,99 @@ bool AcknowledgeBotTeleport(Player* bot)
     return !bot->IsBeingTeleported();
 }
 
+struct MotionWatch
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    uint32_t since = 0;
+    uint32_t summary = 0;
+    uint32_t targetEntry = 0;
+    uint32_t planQuest = 0;
+};
+
+MotionWatch& WatchFor(Player const* bot)
+{
+    static std::unordered_map<uint64_t, MotionWatch> watches;
+    return watches[bot->GetGUID().GetCounter()];
+}
+
+struct PlanLock
+{
+    uint32_t quest = 0;
+    uint32_t fails = 0;
+    uint32_t acted = 0;
+    uint32_t cooldownUntil = 0;
+};
+
+PlanLock& LockFor(Player const* bot)
+{
+    static std::unordered_map<uint64_t, PlanLock> locks;
+    return locks[bot->GetGUID().GetCounter()];
+}
+
+bool QuestCooling(Player const* bot, uint32_t questId)
+{
+    PlanLock const& lock = LockFor(bot);
+    return lock.quest == questId && GameTime::GetGameTimeMS() < lock.cooldownUntil;
+}
+
+void NotePlanFailure(Player* bot, uint32_t questId)
+{
+    PlanLock& lock = LockFor(bot);
+    if (lock.quest != questId)
+    {
+        lock = {};
+        lock.quest = questId;
+    }
+    ++lock.fails;
+    if (ShouldDropPlan(lock.fails, lock.acted))
+        lock.cooldownUntil = GameTime::GetGameTimeMS() + PlanCooldownMs;
+}
+
+std::unordered_map<uint64_t, std::unordered_map<uint32_t, uint32_t>>& GuideBlocks()
+{
+    static std::unordered_map<uint64_t, std::unordered_map<uint32_t, uint32_t>> blocks;
+    return blocks;
+}
+
+bool GuideBlocked(Player const* bot, uint32_t entry)
+{
+    if (!bot || entry == 0)
+        return false;
+    auto& table = GuideBlocks()[bot->GetGUID().GetCounter()];
+    auto found = table.find(entry);
+    if (found == table.end())
+        return false;
+    if (GameTime::GetGameTimeMS() >= found->second)
+    {
+        table.erase(found);
+        return false;
+    }
+    return true;
+}
+
+void BlockGuide(Player const* bot, uint32_t entry)
+{
+    if (bot && entry)
+        GuideBlocks()[bot->GetGUID().GetCounter()][entry] = GameTime::GetGameTimeMS() + 120000;
+}
+
+uint32_t NearbyBots(Player const* self, float x, float y, float yards)
+{
+    uint32_t count = 0;
+    if (!self)
+        return 0;
+    for (LiveLogin const& live : g_logins)
+    {
+        Player* other = live.session->GetPlayer();
+        if (!other || other == self || !other->IsInWorld() || other->GetMapId() != self->GetMapId())
+            continue;
+        if (other->GetExactDist2d(x, y) <= yards)
+            ++count;
+    }
+    return count;
+}
+
 void DebugRefuseCandidate(Player const* bot, Unit const* unit, HostileFacts const& facts, char const* reasonOverride = nullptr)
 {
     if (!PlayerbotDebug() || !bot)
@@ -1003,6 +1130,8 @@ Unit* SelectHostile(Player* bot, Player* leader, bool pvpEnabled, ScanStats& sta
     {
         if (!creature || creature->GetGUID() == bot->GetGUID() || IsMeleeBlacklisted(bot, creature->GetGUID()))
             continue;
+        if (GuideBlocked(bot, creature->GetEntry()) || ShouldDisperse(NearbyBots(bot, creature->GetPositionX(), creature->GetPositionY(), CrowdYards)))
+            continue;
         HostileFacts facts = FactsFor(bot, creature, pvpEnabled);
         if (JudgeHostile(facts, PreySeekYards) == HostileUse::Refuse)
         {
@@ -1181,7 +1310,27 @@ void DebugDecision(Player const* bot, char const* state, char const* reason, Uni
         TC_LOG_INFO("playerbot", "{}", line);
     else
         TC_LOG_INFO("server.worldserver", "playerbot {}", line);
+    MotionWatch& watch = WatchFor(bot);
+    if (state && reason && std::string_view(state) == "quest" && std::string_view(reason) == "acted")
+    {
+        PlanLock& lock = LockFor(bot);
+        if (watch.planQuest)
+            lock.quest = watch.planQuest;
+        ++lock.acted;
+        if (ShouldDropPlan(lock.fails, lock.acted))
+            lock.cooldownUntil = GameTime::GetGameTimeMS() + PlanCooldownMs;
+    }
+    else if (state && std::string_view(state) != "quest")
+        LockFor(bot).acted = 0;
+    if (seekEntry)
+        watch.targetEntry = seekEntry;
+    else if (target && target->GetTypeId() == TYPEID_UNIT)
+        watch.targetEntry = target->GetEntry();
+    if (seekEntry && reason && (std::string_view(reason).find("objective") != std::string_view::npos || std::string_view(reason).find("turn-in") != std::string_view::npos || std::string_view(reason).find("quest") != std::string_view::npos))
+        watch.planQuest = seekEntry;
 }
+
+bool TravelForPlan(Player* bot);
 
 void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
 {
@@ -1212,6 +1361,36 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
             continue;
         }
         ++steps;
+        MotionWatch& watch = WatchFor(bot);
+        uint32_t const now = GameTime::GetGameTimeMS();
+        float const moved = watch.since == 0 ? GuideStallYards : bot->GetExactDist2d(watch.x, watch.y);
+        if (watch.since == 0 || moved >= GuideStallYards)
+        {
+            watch.x = bot->GetPositionX();
+            watch.y = bot->GetPositionY();
+            watch.since = now;
+        }
+        uint32_t const idleSeconds = (now - watch.since) / 1000;
+        if (ShouldBreakStall(idleSeconds, bot->IsInCombat()))
+        {
+            uint32_t const blocked = bot->GetVictim() ? bot->GetVictim()->GetEntry() : watch.targetEntry;
+            BlockGuide(bot, blocked);
+            bot->AttackStop();
+            bot->GetMotionMaster()->Clear();
+            watch.since = now;
+            watch.x = bot->GetPositionX();
+            watch.y = bot->GetPositionY();
+            DebugDecision(bot, "stall", "next-plan", nullptr, nullptr, blocked);
+        }
+        if (watch.summary == 0 || now - watch.summary >= 30000)
+        {
+            watch.summary = now;
+            if (PlayerbotDebug())
+                WritePlayerbotLine(Trinity::StringFormat(
+                    "bot {} {} state=summary zone={} area={} plan={} target={} idle={}",
+                    bot->GetName(), bot->GetGUID().ToString(), ParentZone(bot->GetZoneId()), bot->GetAreaId(),
+                    watch.planQuest, watch.targetEntry, idleSeconds));
+        }
         if (RecoverOwnedBot(bot))
         {
             bool const ghost = bot->HasPlayerFlag(PLAYER_FLAGS_GHOST);
@@ -1296,6 +1475,11 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
             DebugDecision(bot, "seek", "quest-offer", nullptr, &scan);
             continue;
         }
+        if (TravelForPlan(bot))
+        {
+            DebugDecision(bot, "travel", "walk", nullptr, &scan, WatchFor(bot).planQuest);
+            continue;
+        }
         if (WanderInsideLeash(bot))
         {
             DebugDecision(bot, "wander", "leash", nullptr, &scan);
@@ -1307,6 +1491,7 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
 
 void TickSessions(uint32_t diff, bool gateClosed)
 {
+    AdmitQueuedLogins();
     for (auto it = g_creates.begin(); it != g_creates.end();)
     {
         PacketFilter filter(it->session.get());
@@ -1538,6 +1723,14 @@ TravelMemory& MemoryFor(Player* bot)
 {
     static std::unordered_map<uint64_t, TravelMemory> memory;
     TravelMemory& item = memory[bot->GetGUID().GetCounter()];
+    PlanAnchor const& plan = AnchorFor(bot->GetGUID().GetCounter());
+    if (plan.set)
+    {
+        item.anchorSet = true;
+        item.anchorX = plan.x;
+        item.anchorY = plan.y;
+        return item;
+    }
     if (!item.anchorSet)
     {
         item.anchorSet = true;
@@ -1632,29 +1825,43 @@ char const* RewardRefuseReason(Player const* bot, Quest const* quest, uint32 cho
 
 bool ApproachEnder(Player* bot, float x, float y, float z, float interactYards, char const*& detail)
 {
+    (void)interactYards;
+    Reanchor(bot, x, y);
+    SegmentPoint const segment = SegmentDestination(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), x, y, z, PlanSegmentYards);
+    bot->GetMap()->LoadGridsInRange(segment.x, segment.y, 80.0f);
     PathGenerator path(bot);
-    bool const calculated = path.CalculatePath(x, y, z);
+    bool const calculated = path.CalculatePath(segment.x, segment.y, segment.z);
     uint32 const type = uint32(path.GetPathType());
+    bool const hardFail = !calculated || (type & (0x08u | 0x10u | 0x02u)) != 0;
     Movement::PointsArray const& raw = path.GetPath();
-    if (!CorePathIsUsable(calculated, type) || raw.size() < 2)
+    G3D::Vector3 step;
+    bool haveStep = false;
+    if (!hardFail && raw.size() >= 2)
+    {
+        step = raw[1];
+        if (!LocalStepPoint(step.x - bot->GetPositionX(), step.y - bot->GetPositionY(), step.z - bot->GetPositionZ()))
+        {
+            float const dx = segment.x - bot->GetPositionX();
+            float const dy = segment.y - bot->GetPositionY();
+            float const dist = std::sqrt(dx * dx + dy * dy);
+            if (dist > 0.5f)
+            {
+                float const hop = dist > 8.0f ? 8.0f : dist;
+                step.x = bot->GetPositionX() + dx / dist * hop;
+                step.y = bot->GetPositionY() + dy / dist * hop;
+                step.z = bot->GetPositionZ();
+            }
+        }
+        haveStep = true;
+    }
+    else if (EvaluateLocalStep(bot, segment.x, segment.y, step))
+        haveStep = true;
+    if (!haveStep)
     {
         detail = "path-fail";
         return false;
     }
-    std::vector<TurnInPoint> points;
-    points.reserve(raw.size());
-    for (G3D::Vector3 const& point : raw)
-        points.push_back(TurnInPoint{ point.x, point.y, point.z });
-    bool within = false;
-    TurnInPathIndex(points.data(), points.size(), x, y, z, interactYards, within);
-    bool const incomplete = (type & 0x04) != 0 || (type & 0x80) != 0;
-    detail = (incomplete && !within) ? "path-partial" : "out-of-range";
-    G3D::Vector3 const step = raw[1];
-    if (!LocalStepPoint(step.x - bot->GetPositionX(), step.y - bot->GetPositionY(), step.z - bot->GetPositionZ()))
-    {
-        detail = "path-fail";
-        return false;
-    }
+    detail = "path-segment";
     MovementGeneratorType const motion = bot->GetMotionMaster()->GetCurrentMovementGeneratorType();
     if (motion != POINT_MOTION_TYPE && motion != CHASE_MOTION_TYPE)
         bot->GetMotionMaster()->MovePoint(1, step.x, step.y, step.z);
@@ -1683,6 +1890,187 @@ void AcceptFollowUp(Player* bot, Creature* giver)
                 bot->GetName(), bot->GetGUID().ToString(), questId, giver->GetEntry()));
         return;
     }
+}
+
+std::vector<uint32_t> const& DroppersFor(uint32_t itemId)
+{
+    static std::unordered_map<uint32_t, std::vector<uint32_t>> index;
+    static std::vector<uint32_t> const empty;
+    static bool built = false;
+    if (!built)
+    {
+        built = true;
+        for (auto const& [entry, proto] : sObjectMgr->GetCreatureTemplates())
+        {
+            (void)proto;
+            std::vector<uint32> const* items = sObjectMgr->GetCreatureQuestItemList(entry, DIFFICULTY_NONE);
+            if (!items)
+                continue;
+            for (uint32 item : *items)
+                index[item].push_back(entry);
+        }
+    }
+    auto const found = index.find(itemId);
+    return found == index.end() ? empty : found->second;
+}
+
+struct GuideRow
+{
+    Quest const* quest = nullptr;
+    uint32_t starter = 0;
+    bool escort = false;
+    bool vehicle = false;
+    bool supported = false;
+};
+
+std::vector<GuideRow> const& GuideRows()
+{
+    static std::vector<GuideRow> rows;
+    static bool built = false;
+    if (built)
+        return rows;
+    built = true;
+    std::unordered_map<uint32_t, uint32_t> starter;
+    if (QuestRelations const* relations = sObjectMgr->GetCreatureQuestRelationMapHACK())
+        for (auto const& relation : *relations)
+            starter.emplace(relation.second, relation.first);
+    rows.reserve(sObjectMgr->GetQuestTemplates().size());
+    for (auto const& stored : sObjectMgr->GetQuestTemplates())
+    {
+        Quest const* quest = stored.second.get();
+        if (!quest)
+            continue;
+        GuideRow row;
+        row.quest = quest;
+        if (auto const found = starter.find(quest->GetQuestId()); found != starter.end())
+            row.starter = found->second;
+        std::string title = quest->GetLogTitle();
+        for (char& letter : title)
+            if (letter >= 'A' && letter <= 'Z')
+                letter = char(letter - 'A' + 'a');
+        row.escort = title.find("escort") != std::string::npos;
+        row.vehicle = title.find("vehicle") != std::string::npos;
+        for (QuestObjective const& objective : quest->GetObjectives())
+            if (objective.Type <= QUEST_OBJECTIVE_TALKTO)
+                row.supported = true;
+        if (quest->GetObjectives().empty())
+            row.supported = true;
+        rows.push_back(row);
+    }
+    return rows;
+}
+
+bool ZoneHasLevelQuest(Player* bot, uint32_t zone, uint32_t& starter, float& x, float& y, float& z)
+{
+    int32_t checks = 0;
+    for (GuideRow const& row : GuideRows())
+    {
+        Quest const* quest = row.quest;
+        int32_t const sort = quest->GetZoneOrSort();
+        if (sort <= 0 || ParentZone(uint32_t(sort)) != zone)
+            continue;
+        if (row.escort || row.vehicle || !row.supported || !row.starter)
+        {
+            if ((row.escort || row.vehicle || !row.supported) && PlayerbotDebug())
+            {
+                char const* const why = row.escort ? "escort" : (row.vehicle ? "vehicle" : "unsupported");
+                std::string const signature = Trinity::StringFormat("skip|{}|{}", quest->GetQuestId(), why);
+                if (DebugDue(bot->GetGUID().GetCounter(), signature))
+                    WritePlayerbotLine(Trinity::StringFormat(
+                        "bot {} {} state=plan reason={} quest={}",
+                        bot->GetName(), bot->GetGUID().ToString(), why, quest->GetQuestId()));
+            }
+            continue;
+        }
+        int32_t minLevel = quest->GetClassicMinLevel();
+        if (minLevel <= 0)
+            minLevel = 1;
+        if (minLevel > int32_t(bot->GetLevel()))
+            continue;
+        if (!quest->GetAllowableRaces().HasRace(bot->GetRace()))
+            continue;
+        uint32_t const classMask = quest->GetAllowableClasses();
+        if (classMask && (classMask & (1u << (bot->GetClass() - 1))) == 0)
+            continue;
+        if (bot->IsQuestRewarded(quest->GetQuestId()))
+            continue;
+        if (++checks > 200)
+            break;
+        if (!bot->CanTakeQuest(quest, false))
+            continue;
+        float distance = 1.0e9f;
+        if (!NearestSpawn(true, bot->GetMapId(), row.starter, bot->GetPositionX(), bot->GetPositionY(), x, y, z, distance))
+            continue;
+        starter = row.starter;
+        WatchFor(bot).planQuest = quest->GetQuestId();
+        return true;
+    }
+    return false;
+}
+
+bool TravelForPlan(Player* bot)
+{
+    if (!bot || HasCompletedQuest(bot) || HasOpenSeekObjective(bot) || HeldQuestCount(bot) > 0)
+        return false;
+    struct Cache
+    {
+        uint32_t zone = 0;
+        uint8_t level = 0;
+        uint32_t at = 0;
+        bool travel = false;
+        uint32_t nextZone = 0;
+        uint32_t quest = 0;
+        uint32_t entry = 0;
+        float x = 0.0f;
+        float y = 0.0f;
+        float z = 0.0f;
+    };
+    static std::unordered_map<uint64_t, Cache> caches;
+    Cache& cache = caches[bot->GetGUID().GetCounter()];
+    uint32_t const zone = ParentZone(bot->GetZoneId());
+    uint32_t const now = GameTime::GetGameTimeMS();
+    if (cache.at == 0 || cache.zone != zone || cache.level != bot->GetLevel() || now - cache.at > 20000)
+    {
+        cache = {};
+        cache.at = now;
+        cache.zone = zone;
+        cache.level = bot->GetLevel();
+        uint32_t starter = 0;
+        float x = 0.0f;
+        float y = 0.0f;
+        float z = 0.0f;
+        if (!ZoneHasLevelQuest(bot, zone, starter, x, y, z))
+        {
+            uint32_t const next = NextLevelingZone(bot->GetRace(), zone, false);
+            if (next != zone && ZoneHasLevelQuest(bot, next, starter, x, y, z))
+            {
+                cache.travel = true;
+                cache.nextZone = next;
+                cache.quest = WatchFor(bot).planQuest;
+                cache.entry = starter;
+                cache.x = x;
+                cache.y = y;
+                cache.z = z;
+            }
+        }
+    }
+    if (!cache.travel)
+        return false;
+    bool knowsFlight = false;
+    TaxiMask const& mask = bot->m_taxi.GetTaxiMask();
+    for (size_t node = 0; node < mask.size(); ++node)
+        if (mask[node])
+            knowsFlight = true;
+    char const* const how = ChooseTravel(false) == GuideTravel::Flight ? "flight" : "walk";
+    (void)knowsFlight;
+    WatchFor(bot).planQuest = cache.quest;
+    WatchFor(bot).targetEntry = cache.entry;
+    Reanchor(bot, cache.x, cache.y);
+    if (PlayerbotDebug())
+        WritePlayerbotLine(Trinity::StringFormat(
+            "bot {} {} state=travel reason={} flight={} zone={} quest={} entry={}",
+            bot->GetName(), bot->GetGUID().ToString(), how, knowsFlight ? 1 : 0, cache.nextZone, cache.quest, cache.entry));
+    return MoveToward(bot, cache.x, cache.y, false);
 }
 
 bool TurnInCompletedQuest(Player* bot)
@@ -1737,6 +2125,8 @@ bool TurnInCompletedQuest(Player* bot)
         }
         if (row)
             sawRow = true;
+        if (QuestCooling(bot, questId))
+            continue;
         if (!ender.known || (best.known && ender.distance >= best.distance))
             continue;
         best = ender;
@@ -1781,8 +2171,21 @@ bool TurnInCompletedQuest(Player* bot)
             LogTurnIn(bot, reason, bestQuestId, best.entry, bot->GetExactDist(best.creature), status, 0);
             return true;
         }
+        WatchFor(bot).planQuest = bestQuestId;
+        WatchFor(bot).targetEntry = best.entry;
+        if (QuestCooling(bot, bestQuestId))
+        {
+            LogTurnIn(bot, "cooldown", bestQuestId, best.entry, bot->GetExactDist(best.creature), status, 0);
+            return false;
+        }
         char const* detail = "out-of-range";
-        ApproachEnder(bot, best.x, best.y, best.z, limit, detail);
+        if (!ApproachEnder(bot, best.x, best.y, best.z, limit, detail))
+            NotePlanFailure(bot, bestQuestId);
+        if (QuestCooling(bot, bestQuestId))
+        {
+            LogTurnIn(bot, "cooldown", bestQuestId, best.entry, bot->GetExactDist(best.creature), status, 0);
+            return false;
+        }
         LogTurnIn(bot, detail, bestQuestId, best.entry, bot->GetExactDist(best.creature), status, 0);
         return true;
     }
@@ -1803,14 +2206,38 @@ bool TurnInCompletedQuest(Player* bot)
             LogTurnIn(bot, "rewarded", bestQuestId, best.entry, bot->GetExactDist(object), status, xp);
             return true;
         }
+        WatchFor(bot).planQuest = bestQuestId;
+        if (QuestCooling(bot, bestQuestId))
+        {
+            LogTurnIn(bot, "cooldown", bestQuestId, best.entry, best.distance, status, 0);
+            return false;
+        }
         char const* detail = "out-of-range";
-        ApproachEnder(bot, best.x, best.y, best.z, INTERACTION_DISTANCE, detail);
+        if (!ApproachEnder(bot, best.x, best.y, best.z, INTERACTION_DISTANCE, detail))
+            NotePlanFailure(bot, bestQuestId);
+        if (QuestCooling(bot, bestQuestId))
+        {
+            LogTurnIn(bot, "cooldown", bestQuestId, best.entry, best.distance, status, 0);
+            return false;
+        }
         LogTurnIn(bot, best.object ? detail : "ender-not-spawned", bestQuestId, best.entry, best.distance, status, 0);
         return true;
     }
 
+    WatchFor(bot).planQuest = bestQuestId;
+    if (QuestCooling(bot, bestQuestId))
+    {
+        LogTurnIn(bot, "cooldown", bestQuestId, best.entry, best.distance, status, 0);
+        return false;
+    }
     char const* detail = "ender-not-spawned";
-    ApproachEnder(bot, best.x, best.y, best.z, INTERACTION_DISTANCE, detail);
+    if (!ApproachEnder(bot, best.x, best.y, best.z, INTERACTION_DISTANCE, detail))
+        NotePlanFailure(bot, bestQuestId);
+    if (QuestCooling(bot, bestQuestId))
+    {
+        LogTurnIn(bot, "cooldown", bestQuestId, best.entry, best.distance, status, 0);
+        return false;
+    }
     LogTurnIn(bot, detail, bestQuestId, best.entry, best.distance, status, 0);
     return true;
 }
@@ -1850,6 +2277,39 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
                 }
                 if (looted)
                     return true;
+                for (uint32_t const dropper : DroppersFor(uint32_t(objective.ObjectID)))
+                {
+                    if (GuideBlocked(bot, dropper))
+                    {
+                        if (PlayerbotDebug())
+                            WritePlayerbotLine(Trinity::StringFormat(
+                                "bot {} {} state=plan reason=blacklist quest={} entry={}",
+                                bot->GetName(), bot->GetGUID().ToString(), questId, dropper));
+                        continue;
+                    }
+                    bool saw = false;
+                    bool crowded = false;
+                    for (Creature* creature : LiveEntries(bot, ObjectiveSeekYards, dropper))
+                    {
+                        saw = true;
+                        if (ShouldDisperse(NearbyBots(bot, creature->GetPositionX(), creature->GetPositionY(), CrowdYards)))
+                        {
+                            crowded = true;
+                            continue;
+                        }
+                        NoteCreature(bot, best, creature, true, false);
+                    }
+                    if (!saw)
+                    {
+                        float x = 0.0f, y = 0.0f, z = 0.0f, distance = 1.0e9f;
+                        if (NearestSpawn(true, bot->GetMapId(), dropper, bot->GetPositionX(), bot->GetPositionY(), x, y, z, distance))
+                            NoteSpawn(best, x, y, z, distance, dropper, true, false, false);
+                    }
+                    else if (crowded && !best.known && PlayerbotDebug())
+                        WritePlayerbotLine(Trinity::StringFormat(
+                            "bot {} {} state=plan reason=claimed quest={} entry={}",
+                            bot->GetName(), bot->GetGUID().ToString(), questId, dropper));
+                }
                 continue;
             }
             if (!ObjectiveNeedsSeek(objective.Type))
@@ -1878,7 +2338,9 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
             for (Creature* creature : LiveEntries(bot, ObjectiveSeekYards, entry))
             {
                 sawLive = true;
-                if (IsMeleeBlacklisted(bot, creature->GetGUID()))
+                if (IsMeleeBlacklisted(bot, creature->GetGUID()) || GuideBlocked(bot, entry))
+                    continue;
+                if (ShouldDisperse(NearbyBots(bot, creature->GetPositionX(), creature->GetPositionY(), CrowdYards)))
                     continue;
                 if (kill && JudgeHostile(FactsFor(bot, creature, pvpEnabled), ObjectiveSeekYards) == HostileUse::Refuse)
                     continue;
@@ -1911,8 +2373,16 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
         best.object->Use(bot);
         return true;
     }
-    if (!MoveToward(bot, best.x, best.y))
+    Reanchor(bot, best.x, best.y);
+    if (!MoveToward(bot, best.x, best.y, false))
+    {
+        BlockGuide(bot, best.entry);
+        if (PlayerbotDebug())
+            WritePlayerbotLine(Trinity::StringFormat(
+                "bot {} {} state=plan reason=path-fail quest={} entry={}",
+                bot->GetName(), bot->GetGUID().ToString(), 0, best.entry));
         return false;
+    }
     DebugDecision(bot, "seek", best.kill ? "objective-kill" : (best.talk ? "objective-talk" : "objective-object"), best.creature, nullptr, best.entry);
     return true;
 }
@@ -1935,6 +2405,24 @@ bool DiscoverQuestOffer(Player* bot, bool pvpEnabled)
             Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
             if (!quest)
                 continue;
+            std::string title = quest->GetLogTitle();
+            for (char& letter : title)
+                if (letter >= 'A' && letter <= 'Z')
+                    letter = char(letter - 'A' + 'a');
+            bool const escort = title.find("escort") != std::string::npos;
+            bool const vehicle = title.find("vehicle") != std::string::npos;
+            bool supported = quest->GetObjectives().empty();
+            for (QuestObjective const& objective : quest->GetObjectives())
+                if (objective.Type <= QUEST_OBJECTIVE_TALKTO)
+                    supported = true;
+            if (escort || vehicle || !supported)
+            {
+                if (PlayerbotDebug())
+                    WritePlayerbotLine(Trinity::StringFormat(
+                        "bot {} {} state=plan reason={} quest={}",
+                        bot->GetName(), bot->GetGUID().ToString(), escort ? "escort" : (vehicle ? "vehicle" : "unsupported"), questId));
+                continue;
+            }
             ++offers;
             bool const inLog = bot->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE || bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE || bot->GetQuestStatus(questId) == QUEST_STATUS_FAILED;
             QuestOfferFacts offerFacts;
@@ -2024,10 +2512,10 @@ bool DiscoverQuestOffer(Player* bot, bool pvpEnabled)
             }
         }
         DebugDecision(bot, "seek", "quest-giver", nullptr, nullptr, bestEntry);
-        return MoveToward(bot, bestX, bestY);
+        return MoveToward(bot, bestX, bestY, false);
     }
     if (giverDist > INTERACTION_DISTANCE)
-        return MoveToward(bot, giver->GetPositionX(), giver->GetPositionY());
+        return MoveToward(bot, giver->GetPositionX(), giver->GetPositionY(), false);
     bot->AddQuest(offer, giver);
     return true;
 }
@@ -2085,15 +2573,27 @@ bool TryScheduleLogin(PopulationConfig const& config, BotFaction faction, uint32
     }
 
     auto session = std::make_shared<BotSession>(accountId, std::move(accountName));
-    if (!session->BeginLogin(character))
-    {
-        detail = "login holder was not submitted";
-        return false;
-    }
-
-    g_logins.push_back({ std::move(session), faction });
-    TC_LOG_INFO("entities.player.character", "Playerbot V2 login submitted for {} on account {}", character.ToString(), accountId);
-    detail = "login submitted; the session is ticked by the module and is not a navigation test";
+    uint32_t const readyAt = LoginReadyAt(GameTime::GetGameTimeMS(), uint32_t(g_loginQueue.size()));
+    g_loginQueue.push_back({ session, character, faction, readyAt });
+    TC_LOG_INFO("entities.player.character", "Playerbot V2 login queued for {} on account {} at {}", character.ToString(), accountId, readyAt);
+    detail = "login queued; sessions start one at a time so a starter valley is not filled in one tick";
     return true;
+}
+
+void AdmitQueuedLogins()
+{
+    if (g_loginQueue.empty())
+        return;
+    uint32_t const now = GameTime::GetGameTimeMS();
+    auto const due = std::find_if(g_loginQueue.begin(), g_loginQueue.end(), [now](QueuedLogin const& row) { return row.readyAt <= now; });
+    if (due == g_loginQueue.end())
+        return;
+    if (!due->session->BeginLogin(due->character))
+    {
+        g_loginQueue.erase(due);
+        return;
+    }
+    g_logins.push_back({ due->session, due->faction });
+    g_loginQueue.erase(due);
 }
 }

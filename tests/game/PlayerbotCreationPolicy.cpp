@@ -13,6 +13,7 @@
 #include "CharacterFactory.h"
 #include "CreationPolicy.h"
 #include "LifecyclePolicy.h"
+#include "QuestGuide.h"
 #include "StarterCombat.h"
 #include "StarterQuest.h"
 
@@ -97,7 +98,30 @@ using Playerbot::V2::DecisionIntervalMs;
 using Playerbot::V2::ClassifyObjective;
 using Playerbot::V2::ObjectiveSupport;
 using Playerbot::V2::MayAcceptQuest;
+using Playerbot::V2::BotName;
+using Playerbot::V2::ChooseTravel;
+using Playerbot::V2::ClusterFact;
+using Playerbot::V2::GuideQuestFact;
+using Playerbot::V2::GuidePick;
+using Playerbot::V2::GuidePickKind;
+using Playerbot::V2::GuideSkipReason;
+using Playerbot::V2::GuideTravel;
 using Playerbot::V2::GossipInteractYards;
+using Playerbot::V2::LeashOnlyWhenIdle;
+using Playerbot::V2::NameLetters;
+using Playerbot::V2::NextLevelingZone;
+using Playerbot::V2::ParentZone;
+using Playerbot::V2::PickBotName;
+using Playerbot::V2::PlanSegmentYards;
+using Playerbot::V2::SegmentDestination;
+using Playerbot::V2::SegmentPoint;
+using Playerbot::V2::ShouldDisperse;
+using Playerbot::V2::ShouldDropPlan;
+using Playerbot::V2::StarterRaceForSlot;
+using Playerbot::V2::LoginReadyAt;
+using Playerbot::V2::SelectCluster;
+using Playerbot::V2::SelectGuideQuest;
+using Playerbot::V2::ShouldBreakStall;
 using Playerbot::V2::MayTurnInQuest;
 using Playerbot::V2::PreferredArmorSubclass;
 using Playerbot::V2::QuestEnderFact;
@@ -954,4 +978,75 @@ TEST_CASE("Follow stays near the leader and death uses release, walk, or reclaim
     cragFaction.reputationFaction = 23;
     CHECK(ClientCanAttack(cragFaction));
     CHECK_FALSE(NeedsSetAtWar(cragFaction));
+}
+
+TEST_CASE("Quest plans follow the chain, leave a crowded starter valley, and use two names", "[PlayerbotCreation]")
+{
+    CHECK(ParentZone(132) == 1u);
+    CHECK(ParentZone(363) == 14u);
+    CHECK(NextLevelingZone(3, 132, true) == 1u);
+    CHECK(NextLevelingZone(3, 1, false) == 38u);
+    CHECK(NextLevelingZone(2, 14, false) == 17u);
+    CHECK(NextLevelingZone(1, 12, false) == 40u);
+
+    GuideQuestFact chain[3];
+    chain[0] = { 179u, 1, 1, 0, 0, false, false, false, true, false, false, true, 0, 20.0f };
+    chain[1] = { 233u, 1, 1, 179, 0, false, true, true, false, false, false, true, 0, 360.0f };
+    chain[2] = { 234u, 2, 1, 233, 0, false, false, false, true, false, false, true, 0, 10.0f };
+    CHECK(SelectGuideQuest(chain, 3, 1, 1) == 1);
+    CHECK(GuidePickKind(chain[1]) == GuidePick::TurnIn);
+    chain[1].complete = false;
+    chain[1].inLog = false;
+    chain[1].rewarded = true;
+    chain[0].rewarded = true;
+    chain[0].canTake = false;
+    CHECK(SelectGuideQuest(chain, 3, 2, 1) == 2);
+    chain[2].escort = true;
+    chain[0].rewarded = true;
+    chain[0].canTake = false;
+    CHECK(std::string_view(GuideSkipReason(chain[2])) == "escort");
+    CHECK(SelectGuideQuest(chain, 3, 2, 1) == -1);
+
+    CHECK_FALSE(ShouldBreakStall(59, false));
+    CHECK(ShouldBreakStall(60, false));
+    CHECK_FALSE(ShouldBreakStall(60, true));
+    CHECK_FALSE(ShouldDropPlan(2, 5));
+    CHECK(ShouldDropPlan(3, 0));
+    CHECK(ShouldDropPlan(0, 6));
+    CHECK_FALSE(ShouldDisperse(8));
+    CHECK(ShouldDisperse(9));
+    CHECK(LeashOnlyWhenIdle(false));
+    CHECK_FALSE(LeashOnlyWhenIdle(true));
+
+    SegmentPoint const step = SegmentDestination(0.0f, 0.0f, 0.0f, 363.0f, 0.0f, 0.0f, PlanSegmentYards);
+    CHECK(step.x == PlanSegmentYards);
+    CHECK(step.y == 0.0f);
+    SegmentPoint const last = SegmentDestination(350.0f, 0.0f, 0.0f, 363.0f, 0.0f, 0.0f, PlanSegmentYards);
+    CHECK(last.x == 363.0f);
+
+    ClusterFact clusters[3];
+    clusters[0] = { 714u, 1u, 10.0f, 8u, false };
+    clusters[1] = { 714u, 2u, 30.0f, 0u, false };
+    clusters[2] = { 714u, 3u, 50.0f, 1u, false };
+    CHECK(SelectCluster(clusters, 3, 0) == 1);
+
+    CHECK(LoginReadyAt(1000, 0, 750) == 1000u);
+    CHECK(LoginReadyAt(1000, 3, 750) == 3250u);
+    CHECK(StarterRaceForSlot(0, 0) == 1u);
+    CHECK(StarterRaceForSlot(0, 1) == 3u);
+    CHECK(StarterRaceForSlot(1, 0) == 2u);
+    CHECK(StarterRaceForSlot(1, 2) == 6u);
+    CHECK(ChooseTravel(false) == GuideTravel::Walk);
+    CHECK(ChooseTravel(true) == GuideTravel::Flight);
+
+    std::vector<std::string> taken;
+    BotName const first = PickBotName(3, 0, 0, taken);
+    CHECK(NameLetters(first.first));
+    CHECK(NameLetters(first.last));
+    CHECK(first.full == first.first + " " + first.last);
+    taken.push_back(first.full);
+    BotName const second = PickBotName(3, 0, 0, taken);
+    CHECK(second.full != first.full);
+    CHECK(NameLetters(second.first));
+    CHECK(NameLetters(second.last));
 }

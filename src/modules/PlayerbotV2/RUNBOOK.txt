@@ -81,6 +81,16 @@ applies that directory by itself.
    An incomplete kill, object, or talk objective is preferred out to 120
    yards, then by the nearest spawn of that entry on the same map. While
    that objective is open the bot does not walk back to a quest giver.
+   A plan target ignores the 150-yard wander leash. The leash center moves
+   to that hub, so the bot is not pulled back to the starter bind. A path
+   longer than 45 yards is walked in segments. Three path failures, or the
+   same quest action repeating with no movement, puts that quest on a
+   three-minute cooldown and the bot moves on. More than 8 bots within 40
+   yards of a prey target are sent to another cluster. Logins start one at
+   a time, 750ms apart. Race 0 on create rotates the faction's starter races.
+   New characters get a first name and a surname. The surname is stored in
+   characters.surname and the character cache, the same place a player
+   create writes it. Both parts use the character-name and reserved-name checks.
    A completed quest is turned in before any new giver is sought. The ender
    comes from creature_questender or gameobject_questender. The path uses
    the ender's position, including a cave floor. A partial path walks to the

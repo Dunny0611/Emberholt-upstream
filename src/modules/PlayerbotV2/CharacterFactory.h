@@ -65,6 +65,7 @@ struct PersistRequest
     uint32_t otherFactionPoolAccount = 0;
     NewCharacterRequest character;
     std::string name;
+    std::string surname;
 };
 
 struct PersistResult
@@ -144,6 +145,6 @@ inline NewCharacterDecision AdmitPersistence(PopulationConfig const& config, uin
 }
 
 bool IsStarterClass(uint8_t classId);
-PersistResult PersistLevelOneCharacter(PersistRequest const& request);
+PersistResult PersistLevelOneCharacter(PersistRequest& request);
 }
 #endif

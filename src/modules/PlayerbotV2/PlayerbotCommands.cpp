@@ -10,6 +10,7 @@
 #include "BotLogin.h"
 #include "CharacterFactory.h"
 #include "LifecyclePolicy.h"
+#include "QuestGuide.h"
 #include "Config.h"
 #include "CharacterCache.h"
 #include "Chat.h"
@@ -60,6 +61,12 @@ std::vector<uint32_t> PoolAccounts(Playerbot::V2::BotFaction faction)
 bool HandleCreate(ChatHandler* handler, std::string const& name, uint8 race, uint8 classId, uint8 sex)
 {
     using namespace Playerbot::V2;
+    if (race == 0)
+    {
+        static uint32_t slot = 0;
+        race = StarterRaceForSlot(uint8_t(slot % 2), slot / 2);
+        ++slot;
+    }
     PopulationConfig const config = ReadPopulation();
     BotFaction const faction = FactionForStarterRace(race);
     uint32_t const owner = handler->GetSession() ? handler->GetSession()->GetAccountId() : 0;
@@ -97,8 +104,8 @@ bool HandleCreate(ChatHandler* handler, std::string const& name, uint8 race, uin
         return false;
     }
 
-    handler->PSendSysMessage("Playerbot create queued %s (%s). Apply sql/playerbot_v2_character.sql first or the commit fails. .playerbot login uses that row after the commit. Walking is not started.",
-        name.c_str(), result.guid.ToString().c_str());
+    handler->PSendSysMessage("Playerbot create queued %s %s (%s). Apply sql/playerbot_v2_character.sql first or the commit fails. .playerbot login uses that row after the commit. Walking is not started.",
+        request.name.c_str(), request.surname.c_str(), result.guid.ToString().c_str());
     return true;
 }
 

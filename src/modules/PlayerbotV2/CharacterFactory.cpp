@@ -16,6 +16,7 @@
 #include "CharacterFactory.h"
 #include "BotLogin.h"
 #include "LifecyclePolicy.h"
+#include "QuestGuide.h"
 #include "Session/BotSession.h"
 
 #include "AccountMgr.h"
@@ -42,6 +43,7 @@ namespace
 struct InflightCreate
 {
     std::string name;
+    std::string surname;
     ObjectGuid guid;
     uint32_t account = 0;
 };
@@ -68,6 +70,55 @@ void ReleaseInflight(ObjectGuid guid)
     std::erase_if(g_inflight, [guid](InflightCreate const& row) { return row.guid == guid; });
 }
 }
+bool AcceptNamePart(std::string& name)
+{
+    if (!normalizePlayerName(name))
+        return false;
+    if (ObjectMgr::CheckPlayerName(name, LOCALE_enUS, true) != CHAR_NAME_SUCCESS)
+        return false;
+    if (sObjectMgr->IsReservedName(name))
+        return false;
+    return true;
+}
+
+bool ChooseBotNames(PersistRequest& request)
+{
+    bool const generateFirst = request.name.empty() || request.name == "auto";
+    if (!generateFirst && !AcceptNamePart(request.name))
+        return false;
+    uint32_t const salt = request.character.poolAccountId * 17u + uint32_t(request.character.race) * 3u + request.character.sex;
+    std::vector<std::string> taken;
+    for (InflightCreate const& row : g_inflight)
+        if (!row.name.empty() && !row.surname.empty())
+            taken.push_back(row.name + " " + row.surname);
+    for (uint32_t step = 0; step < 64; ++step)
+    {
+        BotName const pick = PickBotName(request.character.race, request.character.sex, salt + step, taken);
+        if (pick.first.empty())
+            return false;
+        std::string first = generateFirst ? pick.first : request.name;
+        std::string last = request.surname.empty() ? pick.last : request.surname;
+        if (!AcceptNamePart(first) || !AcceptNamePart(last))
+        {
+            if (!generateFirst && !request.surname.empty())
+                return false;
+            continue;
+        }
+        std::string const full = first + " " + last;
+        if (FullNameTaken(full, taken))
+            continue;
+        if (CharacterCacheEntry const* existing = sCharacterCache->GetCharacterCacheByName(first))
+        {
+            if (existing->Surname == last || generateFirst)
+                continue;
+        }
+        request.name = std::move(first);
+        request.surname = std::move(last);
+        return true;
+    }
+    return false;
+}
+
 bool IsStarterClass(uint8_t classId)
 {
     switch (classId)
@@ -87,7 +138,7 @@ bool IsStarterClass(uint8_t classId)
     }
 }
 
-PersistResult PersistLevelOneCharacter(PersistRequest const& request)
+PersistResult PersistLevelOneCharacter(PersistRequest& request)
 {
     NewCharacterDecision const admission = AdmitPersistence(request.config, request.alreadyOnline, request.character);
     if (admission.refusal != CreateRefusal::None)
@@ -114,15 +165,12 @@ PersistResult PersistLevelOneCharacter(PersistRequest const& request)
     if (!sObjectMgr->GetPlayerInfo(request.character.race, request.character.classId))
         return { CreateRefusal::InvalidClass, ObjectGuid::Empty, "race and class have no starter position" };
 
+    if (!ChooseBotNames(request))
+        return { CreateRefusal::InvalidName, ObjectGuid::Empty, "first or last name was rejected by the character-name rules" };
+
     std::string normalized = request.name;
-    if (!normalizePlayerName(normalized))
-        return { CreateRefusal::InvalidName, ObjectGuid::Empty, "name failed normalization" };
-
-    if (ObjectMgr::CheckPlayerName(normalized, LOCALE_enUS, true) != CHAR_NAME_SUCCESS)
-        return { CreateRefusal::InvalidName, ObjectGuid::Empty, "name was rejected" };
-
-    if (sObjectMgr->IsReservedName(normalized))
-        return { CreateRefusal::InvalidName, ObjectGuid::Empty, "name is reserved" };
+    if (!normalizePlayerName(normalized) || !AcceptNamePart(request.surname))
+        return { CreateRefusal::InvalidName, ObjectGuid::Empty, "name or surname was rejected" };
 
     for (InflightCreate const& row : g_inflight)
         if (row.name == normalized && row.account == request.character.poolAccountId)
@@ -192,6 +240,13 @@ PersistResult PersistLevelOneCharacter(PersistRequest const& request)
     created->SaveToDB(login, characters, true);
     characters->PAppend("INSERT INTO playerbot_v2_character (guid, account, faction, factory_version, start_level) VALUES ({}, {}, {}, {}, {})",
         guid.GetCounter(), request.character.poolAccountId, uint32_t(admission.faction), FactoryVersion, uint32_t(NewBotLevel));
+    std::string const surname = request.surname;
+    if (!surname.empty())
+    {
+        std::string escapedSurname = surname;
+        CharacterDatabase.EscapeString(escapedSurname);
+        characters->PAppend("UPDATE characters SET surname = '{}' WHERE guid = {}", escapedSurname, guid.GetCounter());
+    }
 
     LoginDatabasePreparedStatement* realmCharacters = LoginDatabase.GetPreparedStatement(LOGIN_REP_REALM_CHARACTERS);
     realmCharacters->setUInt32(0, characterRows + 1);
@@ -203,15 +258,16 @@ PersistResult PersistLevelOneCharacter(PersistRequest const& request)
     uint32_t const poolAccount = request.character.poolAccountId;
     uint8_t const sex = request.character.sex;
     creationSession->AddTransactionCallback(CharacterDatabase.AsyncCommitTransaction(characters)).AfterComplete(
-        [created, login, finished, poolAccount, sex](bool success) mutable
+        [created, login, finished, poolAccount, sex, surname](bool success) mutable
         {
             if (success)
             {
                 LoginDatabase.CommitTransaction(login);
                 sScriptMgr->OnPlayerCreate(created.get());
                 sCharacterCache->AddCharacterCacheEntry(created->GetGUID(), poolAccount, created->GetName(), sex, created->GetRace(), created->GetClass(), created->GetLevel(), false);
-                TC_LOG_INFO("entities.player.character", "Playerbot V2 queued character {} ({}) level {} on pool account {}",
-                    created->GetName(), created->GetGUID().ToString(), uint32_t(created->GetLevel()), poolAccount);
+                sCharacterCache->UpdateCharacterSurname(created->GetGUID(), surname);
+                TC_LOG_INFO("entities.player.character", "Playerbot V2 queued character {} {} ({}) level {} on pool account {}",
+                    created->GetName(), surname, created->GetGUID().ToString(), uint32_t(created->GetLevel()), poolAccount);
             }
             else
             {
@@ -220,7 +276,7 @@ PersistResult PersistLevelOneCharacter(PersistRequest const& request)
             }
             *finished = true;
         });
-    g_inflight.push_back({ normalized, guid, poolAccount });
+    g_inflight.push_back({ normalized, surname, guid, poolAccount });
     HoldCreateSession(creationSession, finished);
 
     return { CreateRefusal::None, guid, "insert queued for a new level-1 character; login is a separate command and waits for the commit" };
