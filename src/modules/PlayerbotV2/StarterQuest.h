@@ -15,6 +15,8 @@
 #define TRINITY_PLAYERBOT_V2_STARTER_QUEST_H
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 namespace Playerbot::V2
 {
@@ -47,6 +49,65 @@ inline ObjectiveSupport ClassifyObjective(uint8_t type)
 inline bool MayAcceptQuest(bool giverNearby, bool canTake, bool canAdd, bool alreadyRewarded, bool alreadyInLog)
 {
     return giverNearby && canTake && canAdd && !alreadyRewarded && !alreadyInLog;
+}
+
+// Combat eligibility does not decide this. A friendly quest giver is still an offer
+// when the core CanTakeQuest and CanAddQuest checks pass.
+struct QuestOfferFacts
+{
+    bool alive = false;
+    bool questGiver = false;
+    bool canTake = false;
+    bool canAdd = false;
+    bool rewarded = false;
+    bool inLog = false;
+};
+
+inline bool MayOfferQuest(QuestOfferFacts const& facts)
+{
+    return facts.alive && facts.canTake && facts.canAdd && !facts.rewarded && !facts.inLog;
+}
+
+inline char const* QuestOfferReason(QuestOfferFacts const& facts)
+{
+    if (!facts.alive)
+        return "dead";
+    if (facts.rewarded)
+        return "rewarded";
+    if (facts.inLog)
+        return "already-have";
+    if (!facts.canTake)
+        return "cannot-take";
+    if (!facts.canAdd)
+        return "cannot-add";
+    return "can-take";
+}
+
+struct QuestGiverHistogram
+{
+    uint32_t npcs = 0;
+    uint32_t offers = 0;
+    uint32_t canTake = 0;
+    uint32_t cannotTake = 0;
+    uint32_t noOffer = 0;
+};
+
+inline void NoteQuestOffer(QuestGiverHistogram& histogram, char const* reason)
+{
+    ++histogram.offers;
+    if (reason && std::string_view(reason) == "can-take")
+        ++histogram.canTake;
+    else
+        ++histogram.cannotTake;
+}
+
+inline std::string FormatQuestGiverHistogram(QuestGiverHistogram const& histogram)
+{
+    return "npcs=" + std::to_string(histogram.npcs)
+        + " offers=" + std::to_string(histogram.offers)
+        + " canTake=" + std::to_string(histogram.canTake)
+        + " cannotTake=" + std::to_string(histogram.cannotTake)
+        + " noOffer=" + std::to_string(histogram.noOffer);
 }
 
 inline bool MayTurnInQuest(bool statusComplete, bool canReward, bool giverInvolved, bool rewardChoiceRequired)

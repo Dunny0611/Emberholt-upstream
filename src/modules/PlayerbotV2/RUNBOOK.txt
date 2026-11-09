@@ -49,9 +49,17 @@ applies that directory by itself.
 
 5. Combat and movement
    One owned bot, one action, 5ms budget. Playerbot.PvP defaults to 0.
-   A target must be a living legal attack target, not a critter, pet, totem,
-   or game master, and its level must be at most the bot's level plus 4.
-   The creature-template civilian flag does not by itself refuse a hostile.
+   A target must be a living creature, not a critter, pet, totem, or game
+   master, and its level must be at most the bot's level plus 4. Classic
+   starter beasts (Mottled Boar, Scorpid Worker, Rockjaw Trogg, Small Crag
+   Boar) use neutral faction templates, so template neutrality is enough.
+   Reputation reaction and IsValidAttackTarget are not the gate: those still
+   consult at-war and phase. Quest givers, vendors, and other service NPCs
+   stay refused, as do immune unit flags. The creature-template civilian
+   flag does not by itself refuse a target. Playerbot.Debug logs one sampled
+   line per refused candidate (entry, level, faction, flags, reaction,
+   distance, reason) and a reason histogram, and the same for quest givers
+   with the CanTakeQuest result of each offered quest.
    The bot faces the target, chases into melee range, and swings through the
    normal attack timer. Players are refused unless PvP is 1 and the
    player is the opposite faction. In a group the bot prefers the leader's

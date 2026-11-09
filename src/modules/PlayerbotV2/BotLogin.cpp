@@ -131,6 +131,68 @@ void AcceptPendingInvites()
     }
 }
 
+uint32_t UnitFlagBits(Unit const* unit)
+{
+    uint32_t bits = 0;
+    auto add = [&](UnitFlags flag)
+    {
+        if (unit->HasUnitFlag(flag))
+            bits |= uint32_t(flag);
+    };
+    add(UNIT_FLAG_SERVER_CONTROLLED);
+    add(UNIT_FLAG_NON_ATTACKABLE);
+    add(UNIT_FLAG_REMOVE_CLIENT_CONTROL);
+    add(UNIT_FLAG_PLAYER_CONTROLLED);
+    add(UNIT_FLAG_RENAME);
+    add(UNIT_FLAG_PREPARATION);
+    add(UNIT_FLAG_UNK_6);
+    add(UNIT_FLAG_NOT_ATTACKABLE_1);
+    add(UNIT_FLAG_IMMUNE_TO_PC);
+    add(UNIT_FLAG_IMMUNE_TO_NPC);
+    add(UNIT_FLAG_LOOTING);
+    add(UNIT_FLAG_PET_IN_COMBAT);
+    add(UNIT_FLAG_PVP_ENABLING);
+    add(UNIT_FLAG_FORCE_NAMEPLATE);
+    add(UNIT_FLAG_CANT_SWIM);
+    add(UNIT_FLAG_CAN_SWIM);
+    add(UNIT_FLAG_NON_ATTACKABLE_2);
+    add(UNIT_FLAG_PACIFIED);
+    add(UNIT_FLAG_STUNNED);
+    add(UNIT_FLAG_IN_COMBAT);
+    add(UNIT_FLAG_ON_TAXI);
+    add(UNIT_FLAG_DISARMED);
+    add(UNIT_FLAG_CONFUSED);
+    add(UNIT_FLAG_FLEEING);
+    add(UNIT_FLAG_POSSESSED);
+    add(UNIT_FLAG_UNINTERACTIBLE);
+    add(UNIT_FLAG_SKINNABLE);
+    add(UNIT_FLAG_MOUNT);
+    add(UNIT_FLAG_UNK_28);
+    add(UNIT_FLAG_PREVENT_EMOTES_FROM_CHAT_TEXT);
+    add(UNIT_FLAG_SHEATHE);
+    add(UNIT_FLAG_IMMUNE);
+    return bits;
+}
+
+FactionTemplateFacts ReadTemplate(FactionTemplateEntry const* entry)
+{
+    FactionTemplateFacts facts;
+    if (!entry)
+        return facts;
+    facts.id = entry->ID;
+    facts.faction = entry->Faction;
+    facts.flags = uint32_t(entry->Flags);
+    facts.factionGroup = entry->FactionGroup;
+    facts.friendGroup = entry->FriendGroup;
+    facts.enemyGroup = entry->EnemyGroup;
+    for (std::size_t i = 0; i < facts.enemies.size() && i < entry->Enemies.size(); ++i)
+    {
+        facts.enemies[i] = entry->Enemies[i];
+        facts.friends[i] = entry->Friend[i];
+    }
+    return facts;
+}
+
 HostileFacts FactsFor(Player const* bot, Unit const* unit, bool pvpEnabled)
 {
     HostileFacts facts;
@@ -138,10 +200,20 @@ HostileFacts FactsFor(Player const* bot, Unit const* unit, bool pvpEnabled)
     facts.creature = unit->GetTypeId() == TYPEID_UNIT;
     facts.alive = unit->IsAlive();
     facts.validAttack = bot->IsValidAttackTarget(unit);
-    facts.factionHostile = bot->IsHostileTo(unit) || unit->IsHostileTo(bot);
+    facts.hostileTo = bot->IsHostileTo(unit);
+    facts.friendlyTo = bot->IsFriendlyTo(unit);
+    facts.hostileFrom = unit->IsHostileTo(bot);
+    facts.friendlyFrom = unit->IsFriendlyTo(bot);
+    facts.factionHostile = facts.hostileTo || facts.hostileFrom;
+    facts.reaction = int32_t(bot->GetReactionTo(unit));
     facts.botLevel = bot->GetLevel();
     facts.distance = bot->GetDistance(unit);
     facts.pvpEnabled = pvpEnabled;
+    facts.entry = unit->GetEntry();
+    facts.unitFlags = UnitFlagBits(unit);
+    facts.npcFlags = uint32_t(unit->GetNpcFlags());
+    facts.immune = (facts.unitFlags & UnitFlagNotAttackable) != 0;
+    facts.nonCombatService = (facts.npcFlags & NpcFlagNonCombatService) != 0;
     if (facts.player)
     {
         Player const* player = unit->ToPlayer();
@@ -153,8 +225,12 @@ HostileFacts FactsFor(Player const* bot, Unit const* unit, bool pvpEnabled)
     {
         facts.civilian = creature->IsCivilian();
         facts.critter = creature->GetCreatureType() == CREATURE_TYPE_CRITTER;
-        facts.pet = creature->IsPet() || creature->IsTotem();
+        facts.totem = creature->IsTotem();
+        facts.pet = creature->IsPet();
         facts.level = creature->GetLevel();
+        ApplyFactionRelation(facts, ReadTemplate(creature->GetFactionTemplateEntry()), ReadTemplate(bot->GetFactionTemplateEntry()));
+        if (facts.factionTemplate == 0)
+            facts.factionTemplate = unit->GetFaction();
     }
     return facts;
 }
@@ -298,7 +374,81 @@ struct ScanStats
     uint32_t raw = 0;
     uint32_t kept = 0;
     uint32_t refused = 0;
+    RefuseHistogram reasons;
 };
+
+bool PlayerbotDebug()
+{
+    return sConfigMgr->GetBoolDefault("Playerbot.Debug"sv, false);
+}
+
+bool DebugDue(uint64_t bot, std::string const& signature)
+{
+    static std::unordered_map<uint64_t, std::unordered_map<std::string, uint32_t>> seen;
+    uint32_t& count = seen[bot][signature];
+    bool const due = count % 8 == 0;
+    ++count;
+    return due;
+}
+
+void WritePlayerbotLine(std::string const& line)
+{
+    if (sLog->ShouldLog("playerbot", LOG_LEVEL_INFO))
+        TC_LOG_INFO("playerbot", "{}", line);
+    else
+        TC_LOG_INFO("server.worldserver", "playerbot {}", line);
+}
+
+void DebugRefuseCandidate(Player const* bot, HostileFacts const& facts)
+{
+    if (!PlayerbotDebug() || !bot)
+        return;
+    std::string const signature = Trinity::StringFormat("refuse|{}|{}|{}", facts.entry, facts.factionTemplate, HostileRefuseReason(facts));
+    if (!DebugDue(bot->GetGUID().GetCounter(), signature))
+        return;
+    WritePlayerbotLine(Trinity::StringFormat(
+        "bot {} {} refuse entry={} level={} faction={} unitFlags={} npcFlags={} alive={} reaction={} hostile={} friendly={} hostileFrom={} friendlyFrom={} dist={:.1f} reason={}",
+        bot->GetName(), bot->GetGUID().ToString(), facts.entry, facts.level, facts.factionTemplate, facts.unitFlags, facts.npcFlags,
+        facts.alive ? 1 : 0, facts.reaction, facts.hostileTo ? 1 : 0, facts.friendlyTo ? 1 : 0, facts.hostileFrom ? 1 : 0,
+        facts.friendlyFrom ? 1 : 0, facts.distance, HostileRefuseReason(facts)));
+}
+
+void DebugQuestOffer(Player const* bot, HostileFacts const& facts, uint32_t questId, char const* reason, bool canTake, bool canAdd)
+{
+    if (!PlayerbotDebug() || !bot)
+        return;
+    std::string const signature = Trinity::StringFormat("quest|{}|{}|{}", facts.entry, questId, reason ? reason : "");
+    if (!DebugDue(bot->GetGUID().GetCounter(), signature))
+        return;
+    WritePlayerbotLine(Trinity::StringFormat(
+        "bot {} {} questgiver entry={} level={} faction={} unitFlags={} npcFlags={} alive={} reaction={} hostile={} friendly={} hostileFrom={} friendlyFrom={} dist={:.1f} quest={} canTake={} canAdd={} reason={}",
+        bot->GetName(), bot->GetGUID().ToString(), facts.entry, facts.level, facts.factionTemplate, facts.unitFlags, facts.npcFlags,
+        facts.alive ? 1 : 0, facts.reaction, facts.hostileTo ? 1 : 0, facts.friendlyTo ? 1 : 0, facts.hostileFrom ? 1 : 0,
+        facts.friendlyFrom ? 1 : 0, facts.distance, questId, canTake ? 1 : 0, canAdd ? 1 : 0, reason ? reason : ""));
+}
+
+void DebugQuestHistogram(Player const* bot, QuestGiverHistogram const& histogram)
+{
+    if (!PlayerbotDebug() || !bot)
+        return;
+    std::string const text = FormatQuestGiverHistogram(histogram);
+    if (!DebugDue(bot->GetGUID().GetCounter(), "qhist|" + text))
+        return;
+    WritePlayerbotLine(Trinity::StringFormat("bot {} {} questgiver-hist {}", bot->GetName(), bot->GetGUID().ToString(), text));
+}
+
+void DebugRefuseHistogram(Player const* bot, ScanStats const& stats)
+{
+    if (!PlayerbotDebug() || !bot)
+        return;
+    std::string const histogram = FormatRefuseHistogram(stats.reasons);
+    std::string const signature = Trinity::StringFormat("hist|{}|{}|{}", histogram, stats.raw, stats.refused);
+    if (!DebugDue(bot->GetGUID().GetCounter(), signature))
+        return;
+    WritePlayerbotLine(Trinity::StringFormat(
+        "bot {} {} refuse-hist {} raw={} kept={} refused={} grid={}",
+        bot->GetName(), bot->GetGUID().ToString(), histogram, stats.raw, stats.kept, stats.refused, stats.gridLoaded ? 1 : 0));
+}
 
 std::list<Creature*> CollectCreatures(Player* bot, float range, ScanStats& stats, FindCreatureAliveState alive = FindCreatureAliveState::Alive)
 {
@@ -316,42 +466,51 @@ std::list<Creature*> CollectCreatures(Player* bot, float range, ScanStats& stats
 
 Unit* SelectHostile(Player* bot, Player* leader, bool pvpEnabled, ScanStats& stats)
 {
-    auto usable = [&](Unit* unit)
+    auto eligible = [&](Unit* unit)
     {
         if (!unit || unit == bot)
             return false;
-        if (JudgeHostile(FactsFor(bot, unit, pvpEnabled)) == HostileUse::Refuse)
-        {
-            ++stats.refused;
-            return false;
-        }
-        ++stats.kept;
-        return true;
+        return JudgeHostile(FactsFor(bot, unit, pvpEnabled)) != HostileUse::Refuse;
     };
 
     if (leader)
-        if (Unit* victim = leader->GetVictim(); usable(victim))
+        if (Unit* victim = leader->GetVictim(); eligible(victim))
             return victim;
 
     Unit* nearest = nullptr;
     float nearestDist = AcquireYards + 1.0f;
-    auto consider = [&](Unit* unit)
-    {
-        if (!usable(unit))
-            return;
-        float const distance = bot->GetDistance(unit);
-        if (distance < nearestDist)
-        {
-            nearest = unit;
-            nearestDist = distance;
-        }
-    };
-
     for (Creature* creature : CollectCreatures(bot, AcquireYards, stats))
-        consider(creature);
+    {
+        if (!creature || creature->GetGUID() == bot->GetGUID())
+            continue;
+        HostileFacts const facts = FactsFor(bot, creature, pvpEnabled);
+        if (JudgeHostile(facts) == HostileUse::Refuse)
+        {
+            ++stats.refused;
+            AccumulateRefuse(stats.reasons, HostileRefuseReason(facts));
+            DebugRefuseCandidate(bot, facts);
+            continue;
+        }
+        ++stats.kept;
+        if (facts.distance < nearestDist)
+        {
+            nearest = creature;
+            nearestDist = facts.distance;
+        }
+    }
+    DebugRefuseHistogram(bot, stats);
 
     for (Unit* attacker : bot->getAttackers())
-        consider(attacker);
+    {
+        if (!eligible(attacker))
+            continue;
+        float const distance = bot->GetDistance(attacker);
+        if (distance < nearestDist)
+        {
+            nearest = attacker;
+            nearestDist = distance;
+        }
+    }
 
     return nearest;
 }
@@ -720,15 +879,31 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
     Creature* giver = nullptr;
     Quest const* offer = nullptr;
     float giverDist = AcquireYards + 1.0f;
+    QuestGiverHistogram questHist;
     for (Creature* creature : nearby)
     {
+        if (!creature)
+            continue;
+        bool const questFlag = creature->HasNpcFlag(UNIT_NPC_FLAG_QUESTGIVER);
+        uint32_t offers = 0;
         for (uint32_t questId : sObjectMgr->GetCreatureQuestRelations(creature->GetEntry()))
         {
             Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
             if (!quest)
                 continue;
+            ++offers;
             bool const inLog = bot->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE || bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE || bot->GetQuestStatus(questId) == QUEST_STATUS_FAILED;
-            if (!MayAcceptQuest(true, bot->CanTakeQuest(quest, false), bot->CanAddQuest(quest, false), bot->IsQuestRewarded(questId), inLog))
+            QuestOfferFacts offerFacts;
+            offerFacts.alive = creature->IsAlive();
+            offerFacts.questGiver = questFlag;
+            offerFacts.canTake = bot->CanTakeQuest(quest, false);
+            offerFacts.canAdd = bot->CanAddQuest(quest, false);
+            offerFacts.rewarded = bot->IsQuestRewarded(questId);
+            offerFacts.inLog = inLog;
+            char const* const reason = QuestOfferReason(offerFacts);
+            NoteQuestOffer(questHist, reason);
+            DebugQuestOffer(bot, FactsFor(bot, creature, pvpEnabled), questId, reason, offerFacts.canTake, offerFacts.canAdd);
+            if (!MayOfferQuest(offerFacts))
                 continue;
             float const distance = bot->GetDistance(creature);
             if (distance < giverDist)
@@ -738,7 +913,17 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
                 giverDist = distance;
             }
         }
+        if (questFlag)
+        {
+            ++questHist.npcs;
+            if (offers == 0)
+            {
+                ++questHist.noOffer;
+                DebugQuestOffer(bot, FactsFor(bot, creature, pvpEnabled), 0, "no-offer", false, false);
+            }
+        }
     }
+    DebugQuestHistogram(bot, questHist);
     if (!giver || !offer)
         return false;
     if (bot->GetDistance(giver) > INTERACTION_DISTANCE)

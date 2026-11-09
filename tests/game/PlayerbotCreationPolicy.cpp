@@ -31,10 +31,23 @@ using Playerbot::V2::PoolSecurityAllowed;
 using Playerbot::V2::ScreenPoolIds;
 using Playerbot::V2::StepInput;
 using Playerbot::V2::StepKind;
+using Playerbot::V2::AccumulateRefuse;
+using Playerbot::V2::ApplyFactionRelation;
+using Playerbot::V2::FactionTemplateFacts;
+using Playerbot::V2::FormatQuestGiverHistogram;
+using Playerbot::V2::FormatRefuseHistogram;
 using Playerbot::V2::HostileFacts;
 using Playerbot::V2::HostileRefuseReason;
 using Playerbot::V2::HostileUse;
 using Playerbot::V2::JudgeHostile;
+using Playerbot::V2::MayOfferQuest;
+using Playerbot::V2::NoteQuestOffer;
+using Playerbot::V2::NpcFlagNonCombatService;
+using Playerbot::V2::QuestGiverHistogram;
+using Playerbot::V2::QuestOfferFacts;
+using Playerbot::V2::QuestOfferReason;
+using Playerbot::V2::RefuseHistogram;
+using Playerbot::V2::UnitFlagNotAttackable;
 using Playerbot::V2::KnownSpellFacts;
 using Playerbot::V2::HarmfulSpellReady;
 using Playerbot::V2::ShouldFollowLeader;
@@ -410,6 +423,173 @@ TEST_CASE("Hostile targets are level-appropriate creatures, and players stay ref
     player.sameFaction = false;
     player.gameMaster = true;
     CHECK(JudgeHostile(player) == HostileUse::Refuse);
+}
+
+// Public rows: creature_template from cmangos classic-db 1.12 (ClassicDB_1_12_1_z2815);
+// faction templates from the AzerothCore factiontemplate_dbc dump of the same classic ids.
+// Reaction is forced friendly and IsValidAttackTarget is forced false. That is the
+// clientless failure mode: reputation at-war and phase both say "not a target".
+FactionTemplateFacts ClassicTemplate(uint32_t id, uint16_t faction, uint32_t flags, uint8_t group, uint8_t friends, uint8_t enemies, uint16_t friendFaction = 0)
+{
+    FactionTemplateFacts row;
+    row.id = id;
+    row.faction = faction;
+    row.flags = flags;
+    row.factionGroup = group;
+    row.friendGroup = friends;
+    row.enemyGroup = enemies;
+    row.friends[0] = friendFaction;
+    return row;
+}
+
+HostileFacts ClassicCreature(uint32_t entry, uint8_t level, uint32_t npcFlags, uint32_t unitFlags, bool civilian, FactionTemplateFacts const& creature, FactionTemplateFacts const& player)
+{
+    HostileFacts facts;
+    facts.creature = true;
+    facts.alive = true;
+    facts.entry = entry;
+    facts.level = level;
+    facts.botLevel = 1;
+    facts.distance = 10.0f;
+    facts.npcFlags = npcFlags;
+    facts.unitFlags = unitFlags;
+    facts.civilian = civilian;
+    facts.nonCombatService = (npcFlags & NpcFlagNonCombatService) != 0;
+    facts.immune = (unitFlags & UnitFlagNotAttackable) != 0;
+    facts.validAttack = false;
+    facts.factionHostile = false;
+    facts.friendlyTo = true;
+    facts.reaction = 4;
+    ApplyFactionRelation(facts, creature, player);
+    return facts;
+}
+
+TEST_CASE("Classic starter beasts stay eligible when reaction and attack checks both fail", "[PlayerbotCreation]")
+{
+    FactionTemplateFacts const horde = ClassicTemplate(2, 2, 72, 5, 4, 10);
+    FactionTemplateFacts const alliance = ClassicTemplate(1, 1, 72, 3, 2, 12);
+    FactionTemplateFacts const beast = ClassicTemplate(189, 7, 1024, 0, 0, 0);
+    FactionTemplateFacts const creatureNeutral = ClassicTemplate(7, 7, 0, 0, 0, 0);
+    FactionTemplateFacts const trogg = ClassicTemplate(36, 32, 1025, 0, 0, 0, 32);
+    FactionTemplateFacts const cragBoar = ClassicTemplate(1094, 23, 1024, 0, 0, 0);
+    FactionTemplateFacts const orgrimmar = ClassicTemplate(29, 76, 0, 4, 4, 2);
+    FactionTemplateFacts const ironforge = ClassicTemplate(55, 47, 0, 2, 2, 4);
+    FactionTemplateFacts const monster = ClassicTemplate(14, 14, 0, 8, 0, 1);
+    FactionTemplateFacts const ambient = ClassicTemplate(35, 31, 0, 0, 1, 0);
+
+    HostileFacts const mottledBoar = ClassicCreature(3098, 1, 0, 0, false, beast, horde);
+    HostileFacts const mottledBoarMax = ClassicCreature(3098, 2, 0, 0, false, beast, horde);
+    HostileFacts const scorpid = ClassicCreature(3124, 3, 0, 0, false, creatureNeutral, horde);
+    HostileFacts const rockjaw = ClassicCreature(707, 1, 0, 0, true, trogg, alliance);
+    HostileFacts const burly = ClassicCreature(724, 2, 0, 0, true, trogg, alliance);
+    HostileFacts const crag = ClassicCreature(708, 3, 0, 0, false, cragBoar, alliance);
+    HostileFacts const kaltunk = ClassicCreature(10176, 20, 2, 4864, true, orgrimmar, horde);
+    HostileFacts const gornek = ClassicCreature(3143, 5, 3, 4864, true, orgrimmar, horde);
+    HostileFacts const sten = ClassicCreature(658, 5, 3, 0, true, ironforge, alliance);
+    HostileFacts const balir = ClassicCreature(713, 5, 2, 0, true, ironforge, alliance);
+
+    CHECK(JudgeHostile(mottledBoar) == HostileUse::Approach);
+    CHECK(JudgeHostile(mottledBoarMax) == HostileUse::Approach);
+    CHECK(JudgeHostile(scorpid) == HostileUse::Approach);
+    CHECK(JudgeHostile(rockjaw) == HostileUse::Approach);
+    CHECK(JudgeHostile(burly) == HostileUse::Approach);
+    CHECK(JudgeHostile(crag) == HostileUse::Approach);
+    CHECK(std::string_view(HostileRefuseReason(mottledBoar)) == "ok");
+    CHECK(mottledBoar.neutralPrey);
+    CHECK(rockjaw.neutralPrey);
+    CHECK(rockjaw.civilian);
+
+    CHECK(JudgeHostile(kaltunk) == HostileUse::Refuse);
+    CHECK(std::string_view(HostileRefuseReason(kaltunk)) == "not-attackable");
+    CHECK(JudgeHostile(gornek) == HostileUse::Refuse);
+    CHECK(std::string_view(HostileRefuseReason(gornek)) == "not-attackable");
+    CHECK(JudgeHostile(sten) == HostileUse::Refuse);
+    CHECK(std::string_view(HostileRefuseReason(sten)) == "civilian");
+    CHECK(JudgeHostile(balir) == HostileUse::Refuse);
+    CHECK(std::string_view(HostileRefuseReason(balir)) == "civilian");
+
+    HostileFacts monsterPrey = ClassicCreature(1, 1, 0, 0, false, monster, horde);
+    monsterPrey.distance = 4.0f;
+    CHECK(JudgeHostile(monsterPrey) == HostileUse::Melee);
+
+    HostileFacts friendlyAmbient = ClassicCreature(1, 1, 0, 0, false, ambient, horde);
+    CHECK(JudgeHostile(friendlyAmbient) == HostileUse::Refuse);
+    CHECK(std::string_view(HostileRefuseReason(friendlyAmbient)) == "not-hostile");
+
+    HostileFacts critter = mottledBoar;
+    critter.critter = true;
+    CHECK(JudgeHostile(critter) == HostileUse::Refuse);
+    CHECK(std::string_view(HostileRefuseReason(critter)) == "critter");
+    HostileFacts pet = mottledBoar;
+    pet.pet = true;
+    CHECK(std::string_view(HostileRefuseReason(pet)) == "pet");
+    HostileFacts totem = mottledBoar;
+    totem.totem = true;
+    CHECK(std::string_view(HostileRefuseReason(totem)) == "totem");
+    HostileFacts gameMaster = mottledBoar;
+    gameMaster.gameMaster = true;
+    CHECK(std::string_view(HostileRefuseReason(gameMaster)) == "gm");
+    HostileFacts tall = mottledBoar;
+    tall.level = 60;
+    CHECK(std::string_view(HostileRefuseReason(tall)) == "level-or-range");
+
+    HostileFacts sameFactionPlayer;
+    sameFactionPlayer.player = true;
+    sameFactionPlayer.alive = true;
+    sameFactionPlayer.validAttack = true;
+    sameFactionPlayer.pvpEnabled = true;
+    sameFactionPlayer.sameFaction = true;
+    sameFactionPlayer.level = 1;
+    sameFactionPlayer.botLevel = 1;
+    sameFactionPlayer.distance = 4.0f;
+    CHECK(std::string_view(HostileRefuseReason(sameFactionPlayer)) == "same-faction");
+
+    RefuseHistogram histogram;
+    uint32_t kept = 0;
+    uint32_t refused = 0;
+    auto scan = [&](HostileFacts const& facts)
+    {
+        if (JudgeHostile(facts) == HostileUse::Refuse)
+        {
+            ++refused;
+            AccumulateRefuse(histogram, HostileRefuseReason(facts));
+        }
+        else
+            ++kept;
+    };
+    scan(mottledBoar);
+    scan(scorpid);
+    scan(rockjaw);
+    scan(burly);
+    scan(crag);
+    scan(kaltunk);
+    scan(gornek);
+    scan(sten);
+    scan(balir);
+    CHECK(kept == 5);
+    CHECK(refused == 4);
+    CHECK(histogram.notHostile == 0);
+    CHECK(histogram.civilian == 2);
+    CHECK(histogram.notAttackable == 2);
+    CHECK(FormatRefuseHistogram(histogram).find("not-hostile=0") != std::string::npos);
+
+    QuestOfferFacts offer;
+    offer.alive = true;
+    offer.questGiver = true;
+    offer.canTake = true;
+    offer.canAdd = true;
+    CHECK(MayOfferQuest(offer));
+    CHECK(std::string_view(QuestOfferReason(offer)) == "can-take");
+    CHECK(JudgeHostile(kaltunk) == HostileUse::Refuse);
+    CHECK(JudgeHostile(sten) == HostileUse::Refuse);
+    offer.canTake = false;
+    CHECK_FALSE(MayOfferQuest(offer));
+    CHECK(std::string_view(QuestOfferReason(offer)) == "cannot-take");
+    QuestGiverHistogram quests;
+    NoteQuestOffer(quests, "can-take");
+    NoteQuestOffer(quests, "cannot-take");
+    quests.npcs = 2;
+    CHECK(FormatQuestGiverHistogram(quests) == "npcs=2 offers=2 canTake=1 cannotTake=1 noOffer=0");
 }
 
 TEST_CASE("A class spell is cast only when it is already known, harmful, and in range", "[PlayerbotCreation]")
