@@ -40,17 +40,21 @@ Public compile of the archive, g++ 13.3.0, against this tree's headers:
   logout touch only a level-1 marker row this module opened. Closing the
   gate kicks those sessions and no others.
 
-  Owned bots accept a same-faction non-bot group invite. One core
-  PathGenerator step or one melee Attack runs per tick. A path is followed
-  only when it is PATHFIND_NORMAL or PATHFIND_INCOMPLETE, is not a shortcut
-  or far from the mesh, and the next point is within 12 yards horizontally
-  and 4 yards vertically. Anything else leaves the bot where it stands.
-  There is no teleport, capital move, or level boost. Starter areas are not
-  treated as permanently unpathable; a tile is used when PathGenerator
-  accepts it. This cloud build has no 70862 mmaps, so no walk was observed.
+  Owned bots accept a same-faction non-bot group invite. One action per
+  tick may follow a usable local PathGenerator step, cast one harmful spell
+  the character already knows, or Attack. Targets are living legal creatures
+  within two levels, or an opposite-faction player only when Playerbot.PvP
+  is 1. Civilians, critters, pets, totems, game masters, and same-faction
+  players are refused. A group follows its leader between 8 and 40 yards and
+  prefers the leader's victim when that victim passes the same checks.
+  Death uses the core release-spirit and corpse-reclaim checks. A ghost
+  without a usable path waits. There is no travel teleport, experience
+  grant, spell teach, or quest accept/complete/reward.
 
   Archive BotAI, the handcrafted road graph, ClassicArmor, and
-  ClassicSpellValue are not linked. Quest progress is not implemented.
+  ClassicSpellValue are not linked. Quest-giver gossip, objective choice,
+  and dungeon scripts are not implemented. This cloud build has no 70862
+  mmaps, so no walk or kill was observed.
 
   Group::IsRaidForQuests keeps isRaidGroup() when no member session is a
   bot. Tap sharing and round-robin loot use BotGroupRules and match the

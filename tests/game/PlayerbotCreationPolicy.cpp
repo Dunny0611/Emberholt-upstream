@@ -13,6 +13,7 @@
 #include "CharacterFactory.h"
 #include "CreationPolicy.h"
 #include "LifecyclePolicy.h"
+#include "StarterCombat.h"
 
 using Playerbot::V2::AcceptGroupInvite;
 using Playerbot::V2::AdmitPersistence;
@@ -29,6 +30,14 @@ using Playerbot::V2::PoolSecurityAllowed;
 using Playerbot::V2::ScreenPoolIds;
 using Playerbot::V2::StepInput;
 using Playerbot::V2::StepKind;
+using Playerbot::V2::HostileFacts;
+using Playerbot::V2::HostileUse;
+using Playerbot::V2::JudgeHostile;
+using Playerbot::V2::KnownSpellFacts;
+using Playerbot::V2::HarmfulSpellReady;
+using Playerbot::V2::ShouldFollowLeader;
+using Playerbot::V2::RecoveryKind;
+using Playerbot::V2::ChooseRecovery;
 using Playerbot::V2::CreateRefusal;
 using Playerbot::V2::DecideNewCharacter;
 using Playerbot::V2::NewCharacterDecision;
@@ -261,4 +270,90 @@ TEST_CASE("Movement follows a core mmap path or a melee attacker and does not in
     input.gateClosed = false;
     input.owned = false;
     CHECK(ChooseStep(input) == StepKind::None);
+}
+
+TEST_CASE("Hostile targets are level-appropriate creatures, and players stay refused unless PvP is on", "[PlayerbotCreation]")
+{
+    HostileFacts creature;
+    creature.creature = true;
+    creature.alive = true;
+    creature.validAttack = true;
+    creature.level = 2;
+    creature.botLevel = 1;
+    creature.distance = 4.0f;
+    CHECK(JudgeHostile(creature) == HostileUse::Melee);
+    creature.distance = 18.0f;
+    CHECK(JudgeHostile(creature) == HostileUse::Approach);
+    creature.distance = 45.0f;
+    CHECK(JudgeHostile(creature) == HostileUse::Refuse);
+    creature.distance = 10.0f;
+    creature.level = 60;
+    CHECK(JudgeHostile(creature) == HostileUse::Refuse);
+    creature.level = 0;
+    CHECK(JudgeHostile(creature) == HostileUse::Refuse);
+    creature.level = 1;
+    creature.civilian = true;
+    CHECK(JudgeHostile(creature) == HostileUse::Refuse);
+    creature.civilian = false;
+    creature.critter = true;
+    CHECK(JudgeHostile(creature) == HostileUse::Refuse);
+    creature.critter = false;
+    creature.gameMaster = true;
+    CHECK(JudgeHostile(creature) == HostileUse::Refuse);
+
+    HostileFacts player;
+    player.player = true;
+    player.alive = true;
+    player.validAttack = true;
+    player.level = 1;
+    player.botLevel = 1;
+    player.distance = 4.0f;
+    player.sameFaction = false;
+    CHECK(JudgeHostile(player) == HostileUse::Refuse);
+    player.pvpEnabled = true;
+    CHECK(JudgeHostile(player) == HostileUse::Melee);
+    player.sameFaction = true;
+    CHECK(JudgeHostile(player) == HostileUse::Refuse);
+    player.sameFaction = false;
+    player.gameMaster = true;
+    CHECK(JudgeHostile(player) == HostileUse::Refuse);
+}
+
+TEST_CASE("A class spell is cast only when it is already known, harmful, and in range", "[PlayerbotCreation]")
+{
+    KnownSpellFacts spell;
+    spell.known = true;
+    spell.active = true;
+    spell.maxRange = 30.0f;
+    spell.distance = 20.0f;
+    CHECK(HarmfulSpellReady(spell));
+    spell.positive = true;
+    CHECK_FALSE(HarmfulSpellReady(spell));
+    spell.positive = false;
+    spell.cooldown = true;
+    CHECK_FALSE(HarmfulSpellReady(spell));
+    spell.cooldown = false;
+    spell.known = false;
+    CHECK_FALSE(HarmfulSpellReady(spell));
+    spell.known = true;
+    spell.distance = 40.0f;
+    CHECK_FALSE(HarmfulSpellReady(spell));
+    spell.distance = 5.0f;
+    spell.maxRange = 0.0f;
+    CHECK_FALSE(HarmfulSpellReady(spell));
+}
+
+TEST_CASE("Follow stays near the leader and death uses release, walk, or reclaim", "[PlayerbotCreation]")
+{
+    CHECK(ShouldFollowLeader(true, true, true, false, 12.0f));
+    CHECK_FALSE(ShouldFollowLeader(true, true, true, true, 12.0f));
+    CHECK_FALSE(ShouldFollowLeader(true, true, true, false, 80.0f));
+    CHECK_FALSE(ShouldFollowLeader(true, true, false, false, 12.0f));
+    CHECK_FALSE(ShouldFollowLeader(false, true, true, false, 12.0f));
+
+    CHECK(ChooseRecovery(true, false, false, false, false, false) == RecoveryKind::None);
+    CHECK(ChooseRecovery(false, false, false, false, false, false) == RecoveryKind::ReleaseSpirit);
+    CHECK(ChooseRecovery(false, true, true, false, false, true) == RecoveryKind::WalkToCorpse);
+    CHECK(ChooseRecovery(false, true, true, false, false, false) == RecoveryKind::Hold);
+    CHECK(ChooseRecovery(false, true, true, true, true, false) == RecoveryKind::Reclaim);
 }

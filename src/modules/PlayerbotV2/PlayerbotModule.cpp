@@ -40,7 +40,7 @@ public:
         TC_LOG_INFO("server.loading",
             "Playerbot V2 experimental port: enable={} killSwitch={} allianceCap={} hordeCap={}. "
             "Startup does not create or log in a character. .playerbot create, login, and logout stay refused while the gate is closed. "
-            "A logged-in owned bot requests one local PathGenerator step and does not teleport. Quest AI is not linked.",
+            "A logged-in owned bot may path, cast a known harmful spell, or attack a legal creature. Quest accept and turn-in are not linked.",
             config.enable, config.killSwitch, config.allianceCap, config.hordeCap);
     }
 

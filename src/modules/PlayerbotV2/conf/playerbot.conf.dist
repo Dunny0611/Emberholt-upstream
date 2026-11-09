@@ -22,9 +22,11 @@ Playerbot.Population.Horde = 0
 Playerbot.Account.Alliance = 0
 Playerbot.Account.Horde = 0
 
-# One PathGenerator step or one melee swing per world tick, 5ms budget.
-# A bad or missing path does not move the bot and does not teleport it.
+# One action per world tick, 5ms budget. A bad path does not move the bot.
 # Starter areas are used when a tile is actually present. Do not raise population here.
+
+# Attack an opposite-faction player only when this is 1. Default refuses every player.
+Playerbot.PvP = 0
 
 # Characters kept on one pool account. Further creates are refused.
 Playerbot.Account.MaxCharacters = 10

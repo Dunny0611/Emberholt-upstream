@@ -14,6 +14,7 @@ applies that directory by itself.
    Playerbot.Account.Alliance = 0
    Playerbot.Account.Horde = 0
    Playerbot.Account.MaxCharacters = 10
+   Playerbot.PvP = 0
 
    The two account ids must already exist, must differ, and must be player
    security. A GM, admin, or console account is refused. This build does not
@@ -38,18 +39,32 @@ applies that directory by itself.
    faction. A bot leader, a cross-faction leader, or a closed gate declines.
    A group with no bot session keeps the core raid, tap, and loot rules.
 
-5. Movement
-   One owned bot per world tick may take one step. PathGenerator must return
-   a normal or incomplete path that is not a shortcut and not far from the
-   mesh, and the next point must be within 12 yards horizontally and 4 yards
-   vertically. Otherwise the bot stays put. There is no teleport, no capital
-   move, and no level boost. Starter areas are not assumed to lack tiles; a
-   tile is used only when PathGenerator accepts it.
-   One melee Attack is issued when an attacker is already within 5 yards.
-   Quest, dungeon, and archive BotAI are not linked. No walk was observed in
-   the cloud build, which does not have the private 70862 mmap tiles.
+5. Combat and movement
+   One owned bot, one action, 5ms budget. Playerbot.PvP defaults to 0.
+   A target must be a living creature this bot can legally attack, not a
+   civilian, critter, pet, totem, or game master, and its level must be at
+   most the bot's level plus 2. Players are refused unless PvP is 1 and the
+   player is the opposite faction. In a group the bot prefers the leader's
+   victim when that victim passes the same checks, and otherwise follows the
+   leader only between 8 and 40 yards on the same map.
+   PathGenerator must accept the step. The next point must be within 12 yards
+   horizontally and 4 yards vertically. A bad path does not move the bot.
+   There is no travel teleport, capital move, level change, experience grant,
+   or spell teach. A harmful spell is cast only when it is already in the
+   spellbook, off cooldown, and in range. Otherwise the bot uses Attack.
+   Death uses the core release-spirit and corpse-reclaim checks. A ghost
+   walks toward its corpse only on a valid local path.
 
-6. Build used for the public check
+6. What is not a quest or dungeon bot
+   The module never accepts, completes, or rewards a quest. Killing a
+   creature can advance an objective only when the character is already on
+   that quest and the core kill-credit path runs. There is no quest-giver
+   gossip, no objective selection, and no dungeon script. Those need the
+   core quest-giver handlers, the quest template's creature entries, and a
+   turn-in at the NPC. Archive BotAI is not linked. No walk or kill was
+   observed in the cloud build.
+
+7. Build used for the public check
    g++ , RelWithDebInfo
    -DSERVERS=1 -DTOOLS=0 -DSCRIPTS=static -DBUILD_TESTING=1 -DBUILD_PLAYERBOT_V2=1
    The server was not started and no database was written.
