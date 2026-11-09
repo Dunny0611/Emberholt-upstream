@@ -1,0 +1,150 @@
+/*
+ * This file is part of the TrinityCore Project. See AUTHORS file for Copyright information
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the
+ * Free Software Foundation; either version 2 of the License, or (at your option)
+ * any later version.
+ *
+ * Create path derived from the GPL-2.0 BotCharacterFactory in
+ * wow-forever-source-0.1.33.zip
+ * (sha256 8ed3810b3f1b04bdc049b705aaa38ace2311e5830c0f68b3ab8c0d493861c6e0).
+ * Account creation, name pools, appearance repair, and GiveLevel(owner) are
+ * not included. The pool account id is supplied by the caller.
+ */
+
+#include "CharacterFactory.h"
+#include "BotLogin.h"
+#include "Session/BotSession.h"
+
+#include "AccountMgr.h"
+#include "CharacterCache.h"
+#include "CharacterPackets.h"
+#include "DatabaseEnv.h"
+#include "Log.h"
+#include "MotionMaster.h"
+#include "ObjectMgr.h"
+#include "Player.h"
+#include "RealmList.h"
+#include "ScriptMgr.h"
+#include "SharedDefines.h"
+#include "WorldSession.h"
+
+#include <memory>
+
+namespace Playerbot::V2
+{
+bool IsStarterClass(uint8_t classId)
+{
+    switch (classId)
+    {
+        case CLASS_WARRIOR:
+        case CLASS_PALADIN:
+        case CLASS_HUNTER:
+        case CLASS_ROGUE:
+        case CLASS_PRIEST:
+        case CLASS_SHAMAN:
+        case CLASS_MAGE:
+        case CLASS_WARLOCK:
+        case CLASS_DRUID:
+            return true;
+        default:
+            return false;
+    }
+}
+
+PersistResult PersistLevelOneCharacter(PersistRequest const& request)
+{
+    NewCharacterDecision const admission = AdmitPersistence(request.config, request.alreadyOnline, request.character);
+    if (admission.refusal != CreateRefusal::None)
+        return { admission.refusal, ObjectGuid::Empty, "population gate, account, faction, or level refused the character before any database call" };
+
+    if (!IsStarterClass(request.character.classId))
+        return { CreateRefusal::InvalidClass, ObjectGuid::Empty, "only a classic starter class is created, at level 1" };
+
+    if (request.character.sex != GENDER_MALE && request.character.sex != GENDER_FEMALE)
+        return { CreateRefusal::InvalidClass, ObjectGuid::Empty, "gender must be male or female" };
+
+    if (!sObjectMgr->GetPlayerInfo(request.character.race, request.character.classId))
+        return { CreateRefusal::InvalidClass, ObjectGuid::Empty, "race and class have no starter position" };
+
+    std::string normalized = request.name;
+    if (!normalizePlayerName(normalized))
+        return { CreateRefusal::InvalidName, ObjectGuid::Empty, "name failed normalization" };
+
+    if (ObjectMgr::CheckPlayerName(normalized, LOCALE_enUS, true) != CHAR_NAME_SUCCESS)
+        return { CreateRefusal::InvalidName, ObjectGuid::Empty, "name was rejected" };
+
+    if (sObjectMgr->IsReservedName(normalized))
+        return { CreateRefusal::InvalidName, ObjectGuid::Empty, "name is reserved" };
+
+    if (sCharacterCache->GetCharacterCacheByName(normalized))
+        return { CreateRefusal::InvalidName, ObjectGuid::Empty, "name is already used" };
+
+    std::string accountName;
+    if (!sAccountMgr->GetName(request.character.poolAccountId, accountName))
+        return { CreateRefusal::UnknownAccount, ObjectGuid::Empty, "pool account does not exist; this factory does not create accounts" };
+
+    uint32_t existing = 0;
+    if (QueryResult count = CharacterDatabase.PQuery("SELECT COUNT(*) FROM characters WHERE account = {}", request.character.poolAccountId))
+        existing = uint32_t(count->Fetch()[0].GetUInt64());
+    if (existing >= request.maxOnAccount)
+        return { CreateRefusal::AccountFull, ObjectGuid::Empty, "pool account is at its character limit" };
+
+    auto createInfo = std::make_shared<WorldPackets::Character::CharacterCreateInfo>();
+    createInfo->Race = request.character.race;
+    createInfo->Class = request.character.classId;
+    createInfo->Sex = request.character.sex;
+    createInfo->Name = normalized;
+
+    auto creationSession = std::make_shared<BotSession>(request.character.poolAccountId, std::move(accountName));
+    std::shared_ptr<Player> created(new Player(creationSession.get()), [](Player* player)
+    {
+        player->CleanupsBeforeDelete();
+        delete player;
+    });
+    created->GetMotionMaster()->Initialize();
+
+    ObjectGuid::LowType const low = sObjectMgr->GetGenerator<HighGuid::Player>().Generate();
+    if (!created->Create(low, createInfo.get()))
+        return { CreateRefusal::CreateFailed, ObjectGuid::Empty, "Player::Create refused the character" };
+
+    if (created->GetLevel() != NewBotLevel)
+        created->SetLevel(NewBotLevel, false);
+    created->SetAtLoginFlag(AT_LOGIN_FIRST);
+
+    ObjectGuid const guid = created->GetGUID();
+    CharacterDatabaseTransaction characters = CharacterDatabase.BeginTransaction();
+    LoginDatabaseTransaction login = LoginDatabase.BeginTransaction();
+    created->SaveToDB(login, characters, true);
+    characters->PAppend("INSERT INTO playerbot_v2_character (guid, account) VALUES ({}, {})", guid.GetCounter(), request.character.poolAccountId);
+
+    LoginDatabasePreparedStatement* realmCharacters = LoginDatabase.GetPreparedStatement(LOGIN_REP_REALM_CHARACTERS);
+    realmCharacters->setUInt32(0, existing + 1);
+    realmCharacters->setUInt32(1, request.character.poolAccountId);
+    realmCharacters->setUInt32(2, sRealmList->GetCurrentRealmId().Realm);
+    login->Append(realmCharacters);
+
+    auto finished = std::make_shared<bool>(false);
+    uint32_t const poolAccount = request.character.poolAccountId;
+    uint8_t const sex = request.character.sex;
+    creationSession->AddTransactionCallback(CharacterDatabase.AsyncCommitTransaction(characters)).AfterComplete(
+        [created, login, finished, poolAccount, sex](bool success) mutable
+        {
+            if (success)
+            {
+                LoginDatabase.CommitTransaction(login);
+                sScriptMgr->OnPlayerCreate(created.get());
+                sCharacterCache->AddCharacterCacheEntry(created->GetGUID(), poolAccount, created->GetName(), sex, created->GetRace(), created->GetClass(), created->GetLevel(), false);
+                TC_LOG_INFO("entities.player.character", "Playerbot V2 queued character {} ({}) level {} on pool account {}",
+                    created->GetName(), created->GetGUID().ToString(), uint32_t(created->GetLevel()), poolAccount);
+            }
+            else
+                TC_LOG_ERROR("entities.player.character", "Playerbot V2 character insert failed for {} on pool account {}", created->GetName(), poolAccount);
+            *finished = true;
+        });
+    HoldCreateSession(creationSession, finished);
+
+    return { CreateRefusal::None, guid, "insert queued for a new level-1 character; login is a separate command and waits for the commit" };
+}
+}

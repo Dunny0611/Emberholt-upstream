@@ -26,15 +26,20 @@ Public compile of the archive, g++ 13.3.0, against this tree's headers:
     PlayerbotV2.cpp: fatal error: BotGroupRules.h: No such file or directory
 
   LoginQueryHolder now has a public header. Initialize() stays in
-  CharacterHandler.cpp. BotSession.cpp syntax-checks: it drops packets,
-  can submit that holder, and does not call InitializeSession, query a
-  battlenet account, or sign guild charters. The module still does not
-  construct a session or call BeginLogin.
+  CharacterHandler.cpp. BotSession drops packets, can submit that holder,
+  and does not call InitializeSession or look up a battlenet account.
+
+  CharacterFactory.cpp calls Player::Create and SaveToDB for a new guid on
+  a caller-supplied pool account. The saved level is 1. GiveLevel is not
+  called. The character insert and the playerbot_v2_character marker share
+  one transaction. Startup does not call the factory. .playerbot create
+  and .playerbot login return before a session or a query while Enable is
+  0 or the kill switch is 1. Login loads a guid only when the marker row
+  matches the pool account, so an existing character is not loaded.
 
   Group::IsRaidForQuests keeps isRaidGroup() when no member session is a
   bot. Tap sharing and round-robin loot use BotGroupRules and match the
   previous walk in that case. ReorderMembers, BotPopulationManager,
   ClassicArmor, ClassicSpellValue, and the road graph are not imported.
-  CharacterFactory.h only admits a request. It does not call Player::Create
-  or SaveToDB. Core mmaps are not regenerated 70862 data, so this module
-  does not walk a bot.
+  Core mmaps are not regenerated 70862 data, so this module does not walk
+  a bot.

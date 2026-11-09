@@ -14,3 +14,13 @@ Playerbot.Population.KillSwitch = 1
 # Maximum new bots online for that faction. 0 = none.
 Playerbot.Population.Alliance = 0
 Playerbot.Population.Horde = 0
+
+# Existing auth account ids that will own new characters. 0 refuses creation.
+# This build does not create auth accounts. Do not point these at an account
+# that already has player characters. Login also requires a row in
+# playerbot_v2_character, which is created with the character.
+Playerbot.Account.Alliance = 0
+Playerbot.Account.Horde = 0
+
+# Characters kept on one pool account. Further creates are refused.
+Playerbot.Account.MaxCharacters = 10

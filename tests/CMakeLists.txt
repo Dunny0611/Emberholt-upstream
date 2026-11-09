@@ -16,9 +16,16 @@ CollectAndAddSourceFiles(
   tests
   ${CMAKE_CURRENT_SOURCE_DIR})
 
+set(PLAYERBOT_TEST_LIB)
+if(BUILD_PLAYERBOT_V2)
+  set(PLAYERBOT_TEST_LIB playerbot-v2)
+  target_compile_definitions(tests PRIVATE TRINITY_PLAYERBOT_V2=1)
+endif()
+
 target_link_libraries(tests
   PRIVATE
     trinity-core-interface
+    ${PLAYERBOT_TEST_LIB}
     game
     Catch2::Catch2WithMain)
 

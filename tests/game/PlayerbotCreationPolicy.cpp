@@ -9,14 +9,20 @@
 
 #include "tc_catch2.h"
 #include "BotGroupRules.h"
+#include "BotLogin.h"
 #include "CharacterFactory.h"
 #include "CreationPolicy.h"
 
+using Playerbot::V2::AdmitPersistence;
 using Playerbot::V2::BotFaction;
 using Playerbot::V2::CreateRefusal;
 using Playerbot::V2::DecideNewCharacter;
 using Playerbot::V2::NewCharacterDecision;
 using Playerbot::V2::NewCharacterRequest;
+using Playerbot::V2::PersistLevelOneCharacter;
+using Playerbot::V2::PersistRequest;
+using Playerbot::V2::PersistResult;
+using Playerbot::V2::TryScheduleLogin;
 using Playerbot::V2::BotOrigin;
 using Playerbot::V2::FactionForStarterRace;
 using Playerbot::V2::LevelForCreation;
@@ -134,3 +140,44 @@ TEST_CASE("Tap and loot rules match the core when the group has no bot", "[Playe
     candidates[1].bot = true;
     CHECK(BotGroupRules::NextRoundRobinLooter(candidates, 0, false) == 2);
 }
+
+#ifdef TRINITY_PLAYERBOT_V2
+TEST_CASE("A closed gate returns before a character insert or a login session", "[PlayerbotCreation]")
+{
+    PopulationConfig const defaults;
+    PersistRequest request;
+    request.config = defaults;
+    request.character.poolAccountId = 50;
+    request.character.ownerAccountId = 9;
+    request.character.race = 1;
+    request.character.classId = 1;
+    request.character.sex = 0;
+    request.character.level = 1;
+    request.name = "Notcreated";
+
+    PersistResult const created = PersistLevelOneCharacter(request);
+    CHECK(created.refusal == CreateRefusal::GateClosed);
+    CHECK(created.guid.IsEmpty());
+
+    std::string detail;
+    CHECK_FALSE(TryScheduleLogin(defaults, BotFaction::Alliance, 0, 50, ObjectGuid::Empty, detail));
+    CHECK(detail == "population gate is closed");
+}
+
+TEST_CASE("Persistence admission does not require the navigation flag", "[PlayerbotCreation]")
+{
+    PopulationConfig armed;
+    armed.enable = true;
+    armed.killSwitch = false;
+    armed.allianceCap = 1;
+    NewCharacterRequest request;
+    request.poolAccountId = 50;
+    request.ownerAccountId = 9;
+    request.race = 1;
+    request.level = 1;
+    NewCharacterDecision const admitted = AdmitPersistence(armed, 0, request);
+    CHECK(admitted.refusal == CreateRefusal::None);
+    CHECK(admitted.level == 1);
+    CHECK_FALSE(MayEnterWorld(armed, BotFaction::Alliance, 0, false));
+}
+#endif

@@ -8,6 +8,7 @@
  */
 
 #include "BotSession.h"
+#include "DB2Structure.h"
 #include "DatabaseEnv.h"
 #include "Group.h"
 #include "Log.h"

@@ -8,6 +8,9 @@ endif()
 
 add_library(playerbot-v2 STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/PlayerbotModule.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/CharacterFactory.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/BotLogin.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/PlayerbotCommands.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/Session/BotSession.cpp)
 
 target_include_directories(playerbot-v2
@@ -24,4 +27,4 @@ trinity_add_module(playerbot-v2 AddSC_playerbot_v2
   CONFIGS
     ${CMAKE_CURRENT_SOURCE_DIR}/conf/playerbot.conf.dist)
 
-message(STATUS "Experimental Playerbot V2 module enabled (session and admission only, no world placement)")
+message(STATUS "Experimental Playerbot V2 module enabled (level-1 factory and gated login, no world walking)")

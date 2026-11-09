@@ -6,16 +6,18 @@
  * Free Software Foundation; either version 2 of the License, or (at your option)
  * any later version.
  *
- * Admission for a new bot character. A decision of None does not call
- * Player::Create, SaveToDB, GiveLevel, or BeginLogin. The module does not
- * create a row.
+ * PersistLevelOneCharacter inserts a new level-1 row on the pool account when
+ * the population gate is open. A closed gate returns before any session or
+ * database call. It does not log the character in and it does not call GiveLevel.
  */
 
 #ifndef TRINITY_PLAYERBOT_V2_CHARACTER_FACTORY_H
 #define TRINITY_PLAYERBOT_V2_CHARACTER_FACTORY_H
 
 #include "CreationPolicy.h"
+#include "ObjectGuid.h"
 #include <cstdint>
+#include <string>
 
 namespace Playerbot::V2
 {
@@ -26,7 +28,12 @@ enum class CreateRefusal : uint8_t
     UnknownFaction,
     MissingPoolAccount,
     OwnerAccount,
-    WrongLevel
+    WrongLevel,
+    InvalidClass,
+    InvalidName,
+    UnknownAccount,
+    AccountFull,
+    CreateFailed
 };
 
 struct NewCharacterRequest
@@ -46,8 +53,23 @@ struct NewCharacterDecision
     BotFaction faction = BotFaction::Unknown;
 };
 
-// poolAccountId 0, or a pool account equal to the owner account, is refused.
-// The requested level must already be NewBotLevel. Owner level is not an input.
+struct PersistRequest
+{
+    PopulationConfig config;
+    uint32_t alreadyOnline = 0;
+    uint32_t maxOnAccount = 10;
+    NewCharacterRequest character;
+    std::string name;
+};
+
+struct PersistResult
+{
+    CreateRefusal refusal = CreateRefusal::GateClosed;
+    ObjectGuid guid;
+    std::string detail;
+};
+
+// Entering the world still requires the navigation flag. Persistence does not.
 inline NewCharacterDecision DecideNewCharacter(PopulationConfig const& config, uint32_t alreadyOnline, bool navigationValidated, NewCharacterRequest const& request)
 {
     NewCharacterDecision decision;
@@ -81,5 +103,42 @@ inline NewCharacterDecision DecideNewCharacter(PopulationConfig const& config, u
     decision.refusal = CreateRefusal::None;
     return decision;
 }
+
+inline NewCharacterDecision AdmitPersistence(PopulationConfig const& config, uint32_t alreadyOnline, NewCharacterRequest const& request)
+{
+    NewCharacterDecision decision;
+    decision.faction = FactionForStarterRace(request.race);
+    decision.level = LevelForCreation(BotOrigin::NewBot, request.level, 0);
+    if (decision.faction == BotFaction::Unknown)
+    {
+        decision.refusal = CreateRefusal::UnknownFaction;
+        return decision;
+    }
+    if (request.poolAccountId == 0)
+    {
+        decision.refusal = CreateRefusal::MissingPoolAccount;
+        return decision;
+    }
+    if (request.poolAccountId == request.ownerAccountId)
+    {
+        decision.refusal = CreateRefusal::OwnerAccount;
+        return decision;
+    }
+    if (request.level != decision.level)
+    {
+        decision.refusal = CreateRefusal::WrongLevel;
+        return decision;
+    }
+    if (!PopulationAllowsNewBot(config, decision.faction, alreadyOnline))
+    {
+        decision.refusal = CreateRefusal::GateClosed;
+        return decision;
+    }
+    decision.refusal = CreateRefusal::None;
+    return decision;
+}
+
+bool IsStarterClass(uint8_t classId);
+PersistResult PersistLevelOneCharacter(PersistRequest const& request);
 }
 #endif

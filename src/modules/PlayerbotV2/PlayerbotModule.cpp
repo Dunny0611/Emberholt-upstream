@@ -7,12 +7,15 @@
  * option) any later version.
  */
 
+#include "BotLogin.h"
 #include "CreationPolicy.h"
 #include "Config.h"
 #include "Log.h"
 #include "ScriptMgr.h"
 #include <algorithm>
 #include <string_view>
+
+void AddSC_playerbot_v2_commands();
 
 namespace
 {
@@ -34,15 +37,16 @@ public:
     void OnWorldInitialized() override
     {
         Playerbot::V2::PopulationConfig const config = ReadPopulation();
-        // navigationValidated is false: this build does not include the road graph and has not
-        // regenerated mmaps from client 70862. MayEnterWorld therefore stays false.
-        bool const wouldPlace = Playerbot::V2::MayEnterWorld(config, Playerbot::V2::BotFaction::Alliance, 0, false)
-            || Playerbot::V2::MayEnterWorld(config, Playerbot::V2::BotFaction::Horde, 0, false);
         TC_LOG_INFO("server.loading",
-            "Playerbot V2 experimental port: enable={} killSwitch={} allianceCap={} hordeCap={} placeBots={}. "
-            "New bots would be level 1. No character is created. Starter-zone walking is not available without regenerated 70862 mmaps.",
-            config.enable, config.killSwitch, config.allianceCap, config.hordeCap, wouldPlace);
-        (void)wouldPlace;
+            "Playerbot V2 experimental port: enable={} killSwitch={} allianceCap={} hordeCap={}. "
+            "Startup does not create or log in a character. .playerbot create and .playerbot login are the only entry points, and both stay refused while the gate is closed. "
+            "Walking, questing, and dungeons are not started.",
+            config.enable, config.killSwitch, config.allianceCap, config.hordeCap);
+    }
+
+    void OnUpdate(uint32 diff) override
+    {
+        Playerbot::V2::TickSessions(diff);
     }
 };
 }
@@ -50,4 +54,5 @@ public:
 void AddSC_playerbot_v2()
 {
     new playerbot_v2_world();
+    AddSC_playerbot_v2_commands();
 }
