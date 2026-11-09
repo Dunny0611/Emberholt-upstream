@@ -19,12 +19,18 @@
 #include <memory>
 #include <string>
 
+class Player;
+
 namespace Playerbot::V2
 {
 class BotSession;
 
 void HoldCreateSession(std::shared_ptr<BotSession> session, std::shared_ptr<bool> finished);
 void TickSessions(uint32_t diff, bool gateClosed);
+
+// Sets the transport-server-time flag a client would set with MOVE_INIT_ACTIVE_MOVER_COMPLETE,
+// points m_seer at the bot, and refreshes visibility. Safe to call after login.
+void PrepareOwnedBot(Player* bot);
 uint32_t OnlineCount(BotFaction faction);
 
 // False when the gate is closed, the level is outside 1..maxLevel, the guid is

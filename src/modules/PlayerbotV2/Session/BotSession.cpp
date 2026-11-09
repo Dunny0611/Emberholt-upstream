@@ -8,6 +8,7 @@
  */
 
 #include "BotSession.h"
+#include "BotLogin.h"
 #include "DB2Structure.h"
 #include "DatabaseEnv.h"
 #include "Group.h"
@@ -48,6 +49,8 @@ bool BotSession::BeginLogin(ObjectGuid characterGuid)
         [this](SQLQueryHolderBase const& done)
         {
             HandlePlayerLogin(static_cast<LoginQueryHolder const&>(done));
+            if (Player* player = GetPlayer())
+                PrepareOwnedBot(player);
         });
     return true;
 }

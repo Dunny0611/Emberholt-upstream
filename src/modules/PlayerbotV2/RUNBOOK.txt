@@ -59,6 +59,17 @@ applies that directory by itself.
    must be alive, in the same phase, in line of sight, and have a path.
    IsHostileTo is not required. IsValidAttackTarget is called only after
    SetAtWarForCombat, and only when that faction has a reputation row.
+   A clientless bot never sends MOVE_INIT_ACTIVE_MOVER_COMPLETE, so
+   Player::CanNeverSee stays true until the bot sets
+   PLAYER_LOCAL_FLAG_OVERRIDE_TRANSPORT_SERVER_TIME. That flag is set
+   after login and after every teleport. m_seer is the bot itself, and
+   UpdateVisibilityForPlayer runs once the flag is set. A missing see
+   check is logged as its sub-reason (transport-server-time, phase,
+   ghost-visibility, sight-range, and the rest), not as cannot-see.
+   TeleportTo is finished on the server: a far teleport calls
+   HandleMoveWorldportAck and a near teleport applies the destination
+   the way HandleMoveTeleportAck does. The line is state=teleport
+   reason=ack-complete.
    Capitals (47, 54, 68, 69, 72, 76, 81, 530) are never set at war.
    Quest givers, vendors, and other service NPCs stay refused. The
    creature-template civilian flag does not by itself refuse a target.
@@ -97,8 +108,9 @@ applies that directory by itself.
    to the spirit healer or the closest graveyard, then calls the healer
    resurrect: ResurrectPlayer(0.5), 25% durability loss, SpawnCorpseBones.
    Resurrection sickness is applied only above level 10. If the walk does
-   not arrive within 20 seconds the bot is teleported to that graveyard
-   and resurrected there.
+   not arrive within 20 seconds the bot is teleported to that graveyard.
+   ResurrectPlayer runs only after the teleport ack has cleared, and the
+   line is state=resurrect. Durability loss stays 25%.
 
 6. Starter quests, kill, gameobject, and talk
    The bot walks to a held kill, object, or talk objective out to 120 yards,

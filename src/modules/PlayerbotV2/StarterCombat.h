@@ -475,6 +475,92 @@ inline bool ResurrectionSicknessApplies(uint8_t level)
     return level > 10;
 }
 
+// A clientless session never sends CMSG_MOVE_INIT_ACTIVE_MOVER_COMPLETE or a teleport ack.
+// Player::CanNeverSee stays true until the transport-server-time flag is set, and a teleport
+// stays pending until the matching near or far ack runs.
+enum class BotTeleportKind : uint8_t
+{
+    None = 0,
+    Near,
+    Far
+};
+
+inline BotTeleportKind ClassifyBotTeleport(bool teleporting, bool sameMap)
+{
+    if (!teleporting)
+        return BotTeleportKind::None;
+    return sameMap ? BotTeleportKind::Near : BotTeleportKind::Far;
+}
+
+inline bool TeleportAckCompletes(BotTeleportKind kind, bool acked)
+{
+    return kind == BotTeleportKind::None || acked;
+}
+
+struct SeeFacts
+{
+    bool inWorld = true;
+    bool destroyed = false;
+    bool sameMap = true;
+    bool samePhase = true;
+    bool transportServerTime = false;
+    bool teleporting = false;
+    bool seerIsSelf = true;
+    bool privateObject = false;
+    bool ghostVisible = true;
+    bool inSightRange = true;
+    bool stealth = false;
+    bool invisible = false;
+    bool gmHidden = false;
+    bool spawnHidden = false;
+};
+
+// Mirrors the CanSeeOrDetect order that blocks a swing. The transport-server-time flag is
+// first because Player::CanNeverSee returns before map, phase, and distance.
+inline char const* CanSeeBlock(SeeFacts const& facts)
+{
+    if (!facts.inWorld)
+        return "not-in-world";
+    if (facts.destroyed)
+        return "destroyed";
+    if (!facts.transportServerTime)
+        return "transport-server-time";
+    if (facts.teleporting)
+        return "teleporting";
+    if (!facts.sameMap)
+        return "different-map";
+    if (!facts.samePhase)
+        return "phase";
+    if (!facts.seerIsSelf)
+        return "seer";
+    if (facts.privateObject)
+        return "private-object";
+    if (facts.gmHidden)
+        return "gm-visibility";
+    if (!facts.ghostVisible)
+        return "ghost-visibility";
+    if (facts.spawnHidden)
+        return "spawn-tracking";
+    if (facts.invisible)
+        return "invisibility";
+    if (facts.stealth)
+        return "stealth";
+    if (!facts.inSightRange)
+        return "sight-range";
+    return nullptr;
+}
+
+inline bool CanSeeSamePhaseCreature(SeeFacts const& facts)
+{
+    return CanSeeBlock(facts) == nullptr;
+}
+
+// Resurrect only after the teleport flag is clear. A pending ack must not swallow the cast.
+inline bool MayResurrectAfterTeleport(bool teleporting, bool hardcore)
+{
+    return !teleporting && !hardcore;
+}
+
 struct KnownSpellFacts
 {
     bool known = false;

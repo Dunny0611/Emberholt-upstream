@@ -15,6 +15,7 @@
 
 #include "AccountMgr.h"
 #include "CellImpl.h"
+#include "ConditionMgr.h"
 #include "Config.h"
 #include "Corpse.h"
 #include "DB2Structure.h"
@@ -40,6 +41,7 @@
 #include "SpellHistory.h"
 #include "SpellInfo.h"
 #include "ReputationMgr.h"
+#include "SmoothPhasing.h"
 #include "SpellMgr.h"
 #include "WorldSession.h"
 
@@ -72,6 +74,8 @@ struct LiveLogin
 std::vector<PendingCreate> g_creates;
 std::vector<LiveLogin> g_logins;
 }
+
+bool AcknowledgeBotTeleport(Player* bot);
 
 void HoldCreateSession(std::shared_ptr<BotSession> session, std::shared_ptr<bool> finished)
 {
@@ -346,12 +350,61 @@ void TryMarkAtWar(Player* bot, Unit* target)
     bot->GetReputationMgr().SetAtWarForCombat(faction);
 }
 
+char const* SeeBlockReason(Player const* bot, WorldObject const* obj)
+{
+    if (!bot || !obj)
+        return "cannot-see";
+    if (bot == obj)
+        return nullptr;
+    if (bot->IsWatchingDeathRecap() && obj->IsUnit() && !obj->IsPrivateObject())
+        return "death-recap";
+    if (!obj->IsInWorld())
+        return "not-in-world";
+    // Player::CanNeverSee returns here until CMSG_MOVE_INIT_ACTIVE_MOVER_COMPLETE sets the flag.
+    if (!bot->HasPlayerLocalFlag(PLAYER_LOCAL_FLAG_OVERRIDE_TRANSPORT_SERVER_TIME))
+        return "transport-server-time";
+    if (bot->IsBeingTeleported())
+        return "teleporting";
+    if (bot->GetMap() != obj->GetMap())
+        return "different-map";
+    if (!bot->InSamePhase(obj))
+        return "phase";
+    if (!bot->m_seer)
+        return "seer";
+    if (!obj->CheckPrivateObjectOwnerVisibility(bot) || !bot->CheckPrivateObjectOwnerVisibility(obj))
+        return "private-object";
+    if (SmoothPhasing const* phasing = obj->GetSmoothPhasing())
+        if (phasing->IsBeingReplacedForSeer(bot->GetGUID()))
+            return "smooth-phase";
+    if (!obj->IsPrivateObject() && !sConditionMgr->IsObjectMeetingVisibilityByObjectIdConditions(obj, bot))
+        return "visibility-condition";
+    if (SpawnTrackingStateData const* tracked = obj->GetSpawnTrackingStateDataForPlayer(bot))
+        if (!tracked->Visible)
+            return "spawn-tracking";
+    if (obj->m_serverSideVisibility.GetValue(SERVERSIDE_VISIBILITY_GM)
+        && bot->m_serverSideVisibilityDetect.GetValue(SERVERSIDE_VISIBILITY_GM) < obj->m_serverSideVisibility.GetValue(SERVERSIDE_VISIBILITY_GM))
+        return "gm-visibility";
+    if (!(obj->m_serverSideVisibility.GetValue(SERVERSIDE_VISIBILITY_GHOST) & bot->m_serverSideVisibilityDetect.GetValue(SERVERSIDE_VISIBILITY_GHOST)))
+        return "ghost-visibility";
+    if (Creature const* creature = obj->ToCreature())
+        if (!creature->IsAlive())
+            return "despawn";
+    if (obj->m_invisibility.GetFlags() && (obj->m_invisibility.GetFlags() & bot->m_invisibilityDetect.GetFlags()) != obj->m_invisibility.GetFlags())
+        return "invisibility";
+    if (obj->m_stealth.GetFlags())
+        return "stealth";
+    float const sight = bot->GetSightRange(obj);
+    if (sight > 0.0f && !bot->IsWithinDist(obj, sight, false))
+        return "sight-range";
+    return "cannot-see";
+}
+
 char const* AttackBlockReason(Player const* bot, Unit const* target)
 {
     if (target->HasUnitState(UNIT_STATE_UNATTACKABLE))
         return "unattackable-state";
     if (!bot->CanSeeOrDetect(target))
-        return "cannot-see";
+        return SeeBlockReason(bot, target);
     if (!target->IsAlive())
         return "dead";
     if (target->HasUnitFlag(UNIT_FLAG_NON_ATTACKABLE_2))
@@ -578,6 +631,7 @@ bool RecoverOwnedBot(Player* bot)
             bot->RemovePet(nullptr, PET_SAVE_NOT_IN_SLOT, true);
             bot->BuildPlayerRepop();
             bot->RepopAtGraveyard();
+            AcknowledgeBotTeleport(bot);
             return true;
         case RecoveryKind::Reclaim:
             if (bot->InArena() || bot->RefuseHardcoreResurrect())
@@ -629,6 +683,99 @@ void WritePlayerbotLine(std::string const& line)
         TC_LOG_INFO("playerbot", "{}", line);
     else
         TC_LOG_INFO("server.worldserver", "playerbot {}", line);
+}
+
+std::unordered_set<uint64_t>& ResurrectAfterTeleport()
+{
+    static std::unordered_set<uint64_t> pending;
+    return pending;
+}
+
+void FinishNearTeleport(Player* bot)
+{
+    if (bot->GetTeleportState() != TeleportState::WaitingForTeleportAck)
+        return;
+    bot->SetTeleportState(TeleportState::NotTeleporting);
+    TeleportLocation const& dest = bot->GetTeleportDest();
+    WorldLocation destLocation = dest.Location;
+    if (dest.TransportGuid)
+    {
+        if (GameObject* go = bot->GetMap()->GetGameObject(*dest.TransportGuid))
+        {
+            if (TransportBase* transport = go->ToTransportBase())
+            {
+                transport->AddPassenger(bot, destLocation);
+                destLocation.Relocate(transport->GetPositionWithOffset(bot->m_movementInfo.transport.pos));
+            }
+        }
+    }
+    bot->UpdatePosition(destLocation, true);
+    bot->SetFallInformation(0, bot->GetPositionZ());
+    uint32 zone = 0;
+    uint32 area = 0;
+    bot->GetZoneAndAreaId(zone, area);
+    bot->UpdateZone(zone, area);
+    bot->ProcessDelayedOperations();
+}
+
+void PrepareOwnedBot(Player* bot)
+{
+    if (!bot)
+        return;
+    bool const hadFlag = bot->HasPlayerLocalFlag(PLAYER_LOCAL_FLAG_OVERRIDE_TRANSPORT_SERVER_TIME);
+    if (!hadFlag)
+        bot->SetPlayerLocalFlag(PLAYER_LOCAL_FLAG_OVERRIDE_TRANSPORT_SERVER_TIME);
+    bool const seerOk = bot->m_seer == bot;
+    if (!seerOk)
+        bot->SetSeer(bot);
+    if (bot->IsInWorld() && (!hadFlag || !seerOk))
+        bot->UpdateVisibilityForPlayer();
+}
+
+bool AcknowledgeBotTeleport(Player* bot)
+{
+    if (!bot || !bot->IsBeingTeleported())
+        return false;
+
+    bot->SetPlayerLocalFlag(PLAYER_LOCAL_FLAG_OVERRIDE_TRANSPORT_SERVER_TIME);
+    if (!bot->m_seer)
+        bot->SetSeer(bot);
+
+    bool const sameMap = bot->IsInWorld() && bot->GetMapId() == bot->GetTeleportDest().Location.GetMapId();
+    TeleportState state = bot->GetTeleportState();
+    if (state == TeleportState::DelayedTeleport || state == TeleportState::DelayedWorldPort)
+    {
+        TeleportLocation const dest = bot->GetTeleportDest();
+        TeleportToOptions const options = TeleportToOptions(bot->GetTeleportOptions().AsUnderlyingType());
+        bot->SetTeleportState(TeleportState::NotTeleporting);
+        bot->TeleportTo(dest, options);
+        state = bot->GetTeleportState();
+    }
+
+    char const* kind = sameMap ? "near" : "far";
+    if (state == TeleportState::WaitingForSuspendTokenResponse || state == TeleportState::WaitingForWorldPortAck)
+    {
+        kind = "far";
+        bot->GetSession()->HandleMoveWorldportAck();
+    }
+    else if (state == TeleportState::WaitingForTeleportAck)
+    {
+        kind = "near";
+        FinishNearTeleport(bot);
+    }
+
+    if (!bot->m_seer || bot->m_seer != bot)
+        bot->SetSeer(bot);
+    if (bot->IsInWorld())
+        bot->UpdateVisibilityForPlayer();
+
+    if (PlayerbotDebug())
+        WritePlayerbotLine(Trinity::StringFormat(
+            "bot {} {} state=teleport reason=ack-complete kind={} map={} x={:.1f} y={:.1f} z={:.1f} inWorld={} teleporting={} seerSelf={} transportTime={}",
+            bot->GetName(), bot->GetGUID().ToString(), kind, bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(),
+            bot->IsInWorld() ? 1 : 0, bot->IsBeingTeleported() ? 1 : 0, bot->m_seer == bot ? 1 : 0,
+            bot->HasPlayerLocalFlag(PLAYER_LOCAL_FLAG_OVERRIDE_TRANSPORT_SERVER_TIME) ? 1 : 0));
+    return !bot->IsBeingTeleported();
 }
 
 void DebugRefuseCandidate(Player const* bot, Unit const* unit, HostileFacts const& facts, char const* reasonOverride = nullptr)
@@ -713,10 +860,33 @@ bool FinishSpiritResurrect(Player* bot)
     return bot->IsAlive() && !bot->HasPlayerFlag(PLAYER_FLAGS_GHOST);
 }
 
+void LogResurrect(Player* bot, char const* reason)
+{
+    bool const alive = FinishSpiritResurrect(bot);
+    if (!PlayerbotDebug() || !bot)
+        return;
+    WritePlayerbotLine(Trinity::StringFormat(
+        "bot {} {} state=resurrect reason={} alive={} ghost={} level={} sickness={} durability=25 ResurrectPlayer=1",
+        bot->GetName(), bot->GetGUID().ToString(), reason ? reason : "", alive ? 1 : 0,
+        bot->HasPlayerFlag(PLAYER_FLAGS_GHOST) ? 1 : 0, bot->GetLevel(),
+        ResurrectionSicknessApplies(bot->GetLevel()) ? 1 : 0));
+}
+
 bool ResurrectAtSpiritHealer(Player* bot)
 {
-    if (bot->RefuseHardcoreResurrect() || bot->IsBeingTeleported())
+    if (bot->RefuseHardcoreResurrect())
         return true;
+    if (bot->IsBeingTeleported())
+    {
+        AcknowledgeBotTeleport(bot);
+        if (bot->IsBeingTeleported() || !MayResurrectAfterTeleport(bot->IsBeingTeleported(), false))
+            return true;
+    }
+    if (ResurrectAfterTeleport().erase(bot->GetGUID().GetCounter()))
+    {
+        LogResurrect(bot, "graveyard");
+        return true;
+    }
 
     struct GhostWatch
     {
@@ -758,17 +928,17 @@ bool ResurrectAtSpiritHealer(Player* bot)
 
     if (ShouldFinishSpiritResurrect(near, elapsed))
     {
-        char const* const reason = near ? "spirit-healer" : "spirit-healer-timeout";
-        if (!near && grave && grave->Loc.GetMapId() == bot->GetMapId())
-            bot->TeleportTo(grave->Loc);
-        bool const alive = FinishSpiritResurrect(bot);
         watches.erase(bot->GetGUID().GetCounter());
-        if (PlayerbotDebug())
-            WritePlayerbotLine(Trinity::StringFormat(
-                "bot {} {} state=ghost reason={} alive={} ghost={} level={} sickness={}",
-                bot->GetName(), bot->GetGUID().ToString(), reason, alive ? 1 : 0,
-                bot->HasPlayerFlag(PLAYER_FLAGS_GHOST) ? 1 : 0, bot->GetLevel(),
-                ResurrectionSicknessApplies(bot->GetLevel()) ? 1 : 0));
+        if (!near && grave)
+        {
+            bot->TeleportTo(grave->Loc);
+            if (AcknowledgeBotTeleport(bot) && MayResurrectAfterTeleport(bot->IsBeingTeleported(), false))
+                LogResurrect(bot, "spirit-healer-timeout");
+            else
+                ResurrectAfterTeleport().insert(bot->GetGUID().GetCounter());
+            return true;
+        }
+        LogResurrect(bot, "spirit-healer");
         return true;
     }
 
@@ -963,6 +1133,13 @@ void DebugDecision(Player const* bot, char const* state, char const* reason, Uni
             target->GetHealth(), target->GetMaxHealth(), bot->GetHealth(), bot->GetMaxHealth(),
             bot->IsInCombat() ? 1 : 0, target->IsInCombat() ? 1 : 0, melee->minDamage, melee->maxDamage,
             melee->attacked ? 1 : 0, melee->swingCalled ? 1 : 0, bot->GetOrientation());
+        line += Trinity::StringFormat(
+            " seerSelf={} transportTime={} teleporting={} sight={:.1f} ghostVis={} ghostDetect={} samePhase={} inWorld={}",
+            bot->m_seer == bot ? 1 : 0, bot->HasPlayerLocalFlag(PLAYER_LOCAL_FLAG_OVERRIDE_TRANSPORT_SERVER_TIME) ? 1 : 0,
+            bot->IsBeingTeleported() ? 1 : 0, bot->GetSightRange(target),
+            target->m_serverSideVisibility.GetValue(SERVERSIDE_VISIBILITY_GHOST),
+            bot->m_serverSideVisibilityDetect.GetValue(SERVERSIDE_VISIBILITY_GHOST),
+            bot->InSamePhase(target) ? 1 : 0, bot->IsInWorld() ? 1 : 0);
     }
     if (sLog->ShouldLog("playerbot", LOG_LEVEL_INFO))
         TC_LOG_INFO("playerbot", "{}", line);
@@ -988,6 +1165,10 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
             continue;
         live.decisionMs = 0;
         Player* bot = live.session->GetPlayer();
+        if (bot && bot->IsBeingTeleported())
+            AcknowledgeBotTeleport(bot);
+        if (bot && bot->IsInWorld())
+            PrepareOwnedBot(bot);
         if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported())
         {
             if (bot)
