@@ -79,8 +79,9 @@ inline bool PopulationAllowsNewBot(PopulationConfig const& config, BotFaction fa
     return cap > 0 && alreadyOnline < cap;
 }
 
-// The module does not place a bot on a map. Core mmap pathing is not a starter-zone walk
-// until mmaps are regenerated from client 70862, and the handcrafted road graph is not linked.
+// Population placement still waits on navigationValidated. That flag does not mean a
+// starter area has no tiles. Movement asks PathGenerator where the bot stands and
+// follows only a usable local point. The handcrafted road graph is not linked.
 inline bool MayEnterWorld(PopulationConfig const& config, BotFaction faction, uint32_t alreadyOnline, bool navigationValidated)
 {
     return navigationValidated && PopulationAllowsNewBot(config, faction, alreadyOnline);
