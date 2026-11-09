@@ -40,6 +40,8 @@ using Playerbot::V2::HostileFacts;
 using Playerbot::V2::HostileRefuseReason;
 using Playerbot::V2::HostileUse;
 using Playerbot::V2::ChoosePreyIndex;
+using Playerbot::V2::ConsiderQuestGiver;
+using Playerbot::V2::MeleeTargetUnreachable;
 using Playerbot::V2::ChooseSwing;
 using Playerbot::V2::NextSwingTimer;
 using Playerbot::V2::SeekQuestBeforePrey;
@@ -730,6 +732,14 @@ TEST_CASE("A running melee timer is not reset, and an empty quest log seeks a gi
 
     CHECK(SeekQuestBeforePrey(0));
     CHECK_FALSE(SeekQuestBeforePrey(1));
+
+    CHECK_FALSE(MeleeTargetUnreachable(3000, 42, 42));
+    CHECK(MeleeTargetUnreachable(8000, 42, 42));
+    CHECK_FALSE(MeleeTargetUnreachable(8000, 42, 41));
+    CHECK(ConsiderQuestGiver(true, false, true));
+    CHECK_FALSE(ConsiderQuestGiver(false, false, true));
+    CHECK_FALSE(ConsiderQuestGiver(true, true, true));
+    CHECK_FALSE(ConsiderQuestGiver(true, false, false));
 }
 
 TEST_CASE("A class spell is cast only when it is already known, harmful, and in range", "[PlayerbotCreation]")

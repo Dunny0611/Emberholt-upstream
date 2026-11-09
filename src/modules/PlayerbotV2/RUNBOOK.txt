@@ -71,7 +71,12 @@ applies that directory by itself.
    The bot turns with SetInFront and swings only when IsWithinMeleeRange,
    in arc, and the attack timer is ready. A running timer is not reset.
    GetDistance already subtracts combat reach, so the stop check is
-   IsWithinMeleeRange rather than a flat 5 yards. Players are refused unless PvP is 1 and the
+   IsWithinMeleeRange rather than a flat 5 yards. The state=melee line
+   includes attackTimer, ready, inMeleeRange, inArc, validAttack, los,
+   victim, health, weapon damage, and whether the swing was called.
+   A target whose health does not fall for 8 seconds is blacklisted.
+   An empty quest log walks to the nearest non-hostile quest giver that
+   has a spawn on the bot's map and a quest CanTakeQuest accepts. Players are refused unless PvP is 1 and the
    player is the opposite faction. In a group the bot prefers the leader's
    victim when that victim passes the same checks, and otherwise follows the
    leader only between 8 and 40 yards on the same map.

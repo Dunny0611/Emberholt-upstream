@@ -154,9 +154,11 @@ inline ObjectivePlan PlanObjective(uint8_t type, bool entryPresent, bool hostile
     return ObjectivePlan::Skip;
 }
 
-// Classic starters: Sten Stoutarm (179), Balir Frosthammer (170), Kaltunk (4641), Gornek (turn-in and follow-ups).
-inline constexpr uint32_t StarterQuestGiverEntries[] = { 658u, 713u, 10176u, 3143u };
-inline constexpr std::size_t StarterQuestGiverCount = 4;
+// A quest giver is usable only when it has a spawn on this map, is not hostile, and offers a quest the bot can take.
+inline bool ConsiderQuestGiver(bool hasSpawnOnMap, bool hostileToBot, bool canTake)
+{
+    return hasSpawnOnMap && !hostileToBot && canTake;
+}
 
 // An empty log has to walk to a giver before grinding. A held quest keeps its own objective.
 inline bool SeekQuestBeforePrey(uint32_t heldQuests)

@@ -220,6 +220,14 @@ inline uint32_t NextSwingTimer(SwingFacts const& facts, uint32_t weaponSpeed)
     return facts.attackTimer;
 }
 
+// A target whose health does not fall while the bot is on it is treated as unreachable.
+inline constexpr uint32_t UnreachableMeleeMs = 8000;
+
+inline bool MeleeTargetUnreachable(uint32_t elapsedMs, uint32_t healthThen, uint32_t healthNow)
+{
+    return elapsedMs >= UnreachableMeleeMs && healthThen > 0 && healthNow >= healthThen;
+}
+
 // Nearest creature that is still legal prey inside approachYards. Friendly guards and critters are skipped.
 inline int32_t ChoosePreyIndex(HostileFacts const* facts, std::size_t count, float approachYards)
 {

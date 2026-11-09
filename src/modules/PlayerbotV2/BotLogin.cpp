@@ -308,28 +308,118 @@ SwingFacts SwingFor(Player const* bot, Unit const* target)
     return facts;
 }
 
-void EngageHostile(Player* bot, Unit* target)
+struct MeleeTrace
 {
-    SwingFacts swing = SwingFor(bot, target);
-    SwingAction action = ChooseSwing(swing);
-    if (action == SwingAction::Close)
-        return;
-    if (action == SwingAction::Face)
+    SwingFacts swing;
+    bool validAttack = false;
+    bool los = false;
+    bool attacked = false;
+    bool swingCalled = false;
+    float minDamage = 0.0f;
+    float maxDamage = 0.0f;
+};
+
+struct TargetWatch
+{
+    ObjectGuid guid;
+    uint32_t health = 0;
+    uint32_t since = 0;
+};
+
+std::unordered_map<uint64_t, TargetWatch>& MeleeWatches()
+{
+    static std::unordered_map<uint64_t, TargetWatch> watches;
+    return watches;
+}
+
+std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint32_t>>& MeleeBlacklist()
+{
+    static std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint32_t>> blacklist;
+    return blacklist;
+}
+
+bool IsMeleeBlacklisted(Player const* bot, ObjectGuid guid)
+{
+    auto botIt = MeleeBlacklist().find(bot->GetGUID().GetCounter());
+    if (botIt == MeleeBlacklist().end())
+        return false;
+    auto itr = botIt->second.find(guid.GetCounter());
+    if (itr == botIt->second.end())
+        return false;
+    if (GameTime::GetGameTimeMS() >= itr->second)
     {
-        // MoveFace on a clientless player can finish with duration 0 and never store orientation.
-        bot->SetInFront(target);
-        swing.inArc = true;
-        action = ChooseSwing(swing);
+        botIt->second.erase(itr);
+        return false;
     }
-    if (!SwingCallsAttack(action))
-        return;
-    if (!bot->IsValidAttackTarget(target))
+    return true;
+}
+
+void BlacklistMeleeTarget(Player* bot, ObjectGuid guid)
+{
+    MeleeBlacklist()[bot->GetGUID().GetCounter()][guid.GetCounter()] = GameTime::GetGameTimeMS() + 120000;
+    MeleeWatches().erase(bot->GetGUID().GetCounter());
+    if (bot->GetVictim() && bot->GetVictim()->GetGUID() == guid)
+        bot->AttackStop();
+}
+
+bool MeleeGaveUp(Player* bot, Unit* target)
+{
+    TargetWatch& watch = MeleeWatches()[bot->GetGUID().GetCounter()];
+    uint32_t const now = GameTime::GetGameTimeMS();
+    uint32_t const health = target->GetHealth();
+    if (watch.guid != target->GetGUID())
+    {
+        watch.guid = target->GetGUID();
+        watch.health = health;
+        watch.since = now;
+        return false;
+    }
+    if (health < watch.health)
+    {
+        watch.health = health;
+        watch.since = now;
+        return false;
+    }
+    if (!MeleeTargetUnreachable(now - watch.since, watch.health, health))
+        return false;
+    BlacklistMeleeTarget(bot, target->GetGUID());
+    return true;
+}
+
+void EngageHostile(Player* bot, Unit* target, MeleeTrace& trace)
+{
+    bot->SetSheath(SHEATH_STATE_MELEE);
+    bot->CalculateMinMaxDamage(BASE_ATTACK, false, true, trace.minDamage, trace.maxDamage);
+    if (trace.minDamage <= 0.0f && trace.maxDamage <= 0.0f)
+    {
+        bot->UpdateDamagePhysical(BASE_ATTACK);
+        bot->CalculateMinMaxDamage(BASE_ATTACK, false, true, trace.minDamage, trace.maxDamage);
+    }
+    bot->SetInFront(target);
+    trace.swing = SwingFor(bot, target);
+    trace.los = bot->IsWithinLOSInMap(target);
+    trace.validAttack = bot->IsValidAttackTarget(target);
+    if (!trace.validAttack)
+    {
         TryMarkAtWar(bot, target);
-    if (!bot->IsValidAttackTarget(target))
+        trace.validAttack = bot->IsValidAttackTarget(target);
+    }
+    SwingAction action = ChooseSwing(trace.swing);
+    if (action == SwingAction::Close || !trace.los || !trace.validAttack)
         return;
     if (bot->GetVictim() != target || !bot->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
-        bot->Attack(target, true);
+    {
+        trace.attacked = bot->Attack(target, true);
+        trace.swing = SwingFor(bot, target);
+        action = ChooseSwing(trace.swing);
+    }
+    else
+        trace.attacked = true;
+    if (!SwingCallsAttack(action))
+        return;
+    trace.swingCalled = true;
     bot->DoMeleeAttackIfReady();
+    trace.swing = SwingFor(bot, target);
 }
 
 uint32_t FindKnownHarmfulSpell(Player* bot, Unit* target)
@@ -530,7 +620,7 @@ Unit* SelectHostile(Player* bot, Player* leader, bool pvpEnabled, ScanStats& sta
     float nearestDist = PreySeekYards + 1.0f;
     for (Creature* creature : CollectCreatures(bot, PreySeekYards, stats))
     {
-        if (!creature || creature->GetGUID() == bot->GetGUID())
+        if (!creature || creature->GetGUID() == bot->GetGUID() || IsMeleeBlacklisted(bot, creature->GetGUID()))
             continue;
         HostileFacts const facts = FactsFor(bot, creature, pvpEnabled);
         if (JudgeHostile(facts, PreySeekYards) == HostileUse::Refuse)
@@ -602,26 +692,7 @@ void DebugQuestBranch(Player const* bot, char const* action)
         bot->GetName(), bot->GetGUID().ToString(), QuestLogText(bot), HeldQuestCount(bot), action ? action : ""));
 }
 
-void DebugMelee(Player const* bot, Unit const* target)
-{
-    if (!PlayerbotDebug() || !bot || !target)
-        return;
-    SwingFacts const swing = SwingFor(bot, target);
-    Unit const* victim = bot->GetVictim();
-    std::string const signature = Trinity::StringFormat("melee|{}|{}|{}|{}", target->GetEntry(), swing.inMeleeRange ? 1 : 0, swing.inArc ? 1 : 0, bot->IsValidAttackTarget(target) ? 1 : 0);
-    if (!DebugDue(bot->GetGUID().GetCounter(), signature))
-        return;
-    WritePlayerbotLine(Trinity::StringFormat(
-        "bot {} {} melee-check attackTimer={} ready={} inMeleeRange={} inArc={} validAttack={} victim={} meleeState={} moving={} targetHp={}/{} botHp={}/{} botCombat={} targetCombat={} orient={:.3f} action={}",
-        bot->GetName(), bot->GetGUID().ToString(), swing.attackTimer, swing.attackReady ? 1 : 0, swing.inMeleeRange ? 1 : 0,
-        swing.inArc ? 1 : 0, bot->IsValidAttackTarget(target) ? 1 : 0, victim ? victim->GetGUID().ToString() : "none",
-        bot->HasUnitState(UNIT_STATE_MELEE_ATTACKING) ? 1 : 0, bot->HasUnitState(UNIT_STATE_MOVING) ? 1 : 0,
-        target->GetHealth(), target->GetMaxHealth(), bot->GetHealth(), bot->GetMaxHealth(),
-        bot->IsInCombat() ? 1 : 0, target->IsInCombat() ? 1 : 0, bot->GetOrientation(),
-        uint32(ChooseSwing(swing))));
-}
-
-void DebugDecision(Player const* bot, char const* state, char const* reason, Unit const* target, ScanStats const* scan, uint32_t seekEntry = 0)
+void DebugDecision(Player const* bot, char const* state, char const* reason, Unit const* target, ScanStats const* scan, uint32_t seekEntry = 0, MeleeTrace const* melee = nullptr)
 {
     if (!sConfigMgr->GetBoolDefault("Playerbot.Debug"sv, false) || !bot)
         return;
@@ -650,13 +721,25 @@ void DebugDecision(Player const* bot, char const* state, char const* reason, Uni
         previous.signature = signature;
         previous.suppressed = 0;
     }
-    std::string const line = Trinity::StringFormat(
+    std::string line = Trinity::StringFormat(
         "bot {} {} state={} reason={} target={} entry={} level={} ghost={} corpseDist={:.1f} grid={} raw={} kept={} refused={} repeated={}",
         bot->GetName(), bot->GetGUID().ToString(), state, reason ? reason : "",
         target ? target->GetGUID().ToString() : "none", entry, level,
         bot->HasPlayerFlag(PLAYER_FLAGS_GHOST), corpseDistance,
         scan && scan->gridLoaded ? 1 : 0, scan ? scan->raw : 0, scan ? scan->kept : 0, scan ? scan->refused : 0,
         previous.suppressed);
+    if (melee && target)
+    {
+        Unit const* victim = bot->GetVictim();
+        line += Trinity::StringFormat(
+            " attackTimer={} ready={} inMeleeRange={} inArc={} validAttack={} los={} victim={} meleeState={} moving={} targetHp={}/{} botHp={}/{} botCombat={} targetCombat={} minDmg={:.2f} maxDmg={:.2f} attacked={} swingCalled={} orient={:.3f}",
+            melee->swing.attackTimer, melee->swing.attackReady ? 1 : 0, melee->swing.inMeleeRange ? 1 : 0, melee->swing.inArc ? 1 : 0,
+            melee->validAttack ? 1 : 0, melee->los ? 1 : 0, victim ? victim->GetGUID().ToString() : "none",
+            bot->HasUnitState(UNIT_STATE_MELEE_ATTACKING) ? 1 : 0, bot->HasUnitState(UNIT_STATE_MOVING) ? 1 : 0,
+            target->GetHealth(), target->GetMaxHealth(), bot->GetHealth(), bot->GetMaxHealth(),
+            bot->IsInCombat() ? 1 : 0, target->IsInCombat() ? 1 : 0, melee->minDamage, melee->maxDamage,
+            melee->attacked ? 1 : 0, melee->swingCalled ? 1 : 0, bot->GetOrientation());
+    }
     if (sLog->ShouldLog("playerbot", LOG_LEVEL_INFO))
         TC_LOG_INFO("playerbot", "{}", line);
     else
@@ -726,11 +809,18 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
 
         ScanStats scan;
         Unit* target = questTarget ? questTarget : SelectHostile(bot, leader, pvpEnabled, scan);
-        if (target && !bot->IsWithinMeleeRange(target))
+        if (target && IsMeleeBlacklisted(bot, target->GetGUID()))
+            target = nullptr;
+        if (target && bot->IsWithinMeleeRange(target) && MeleeGaveUp(bot, target))
+        {
+            DebugDecision(bot, "give-up", "unreachable", target, &scan);
+            target = nullptr;
+        }
+        if (target && (!bot->IsWithinMeleeRange(target) || !bot->IsWithinLOSInMap(target)))
         {
             if (MoveToward(bot, target->GetPositionX(), target->GetPositionY()))
             {
-                DebugDecision(bot, "seek", "prey", target, &scan);
+                DebugDecision(bot, "seek", bot->IsWithinLOSInMap(target) ? "prey" : "no-los", target, &scan);
                 continue;
             }
             target = questTarget ? target : nullptr;
@@ -747,10 +837,10 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
                     continue;
                 }
             }
-            EngageHostile(bot, target);
+            MeleeTrace trace;
+            EngageHostile(bot, target, trace);
             TryLootQuestItems(bot, target);
-            DebugMelee(bot, target);
-            DebugDecision(bot, "melee", HostileRefuseReason(facts), target, &scan);
+            DebugDecision(bot, "melee", HostileRefuseReason(facts), target, &scan, 0, &trace);
             continue;
         }
         if (DiscoverQuestOffer(bot, pvpEnabled))
@@ -887,6 +977,12 @@ bool NearestSpawn(bool creatures, uint32 mapId, uint32 entry, float x, float y, 
         }
     }
     return any;
+}
+
+bool HasCreatureSpawn(uint32 mapId, uint32 entry)
+{
+    auto const& index = SpawnIndex(true);
+    return index.find((uint64_t(mapId) << 32) | entry) != index.end();
 }
 
 std::list<Creature*> LiveEntries(Player* bot, float range, uint32 entry)
@@ -1150,6 +1246,8 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
             for (Creature* creature : LiveEntries(bot, ObjectiveSeekYards, entry))
             {
                 sawLive = true;
+                if (IsMeleeBlacklisted(bot, creature->GetGUID()))
+                    continue;
                 if (kill && JudgeHostile(FactsFor(bot, creature, pvpEnabled), ObjectiveSeekYards) == HostileUse::Refuse)
                     continue;
                 NoteCreature(bot, best, creature, kill, !kill);
@@ -1240,43 +1338,48 @@ bool DiscoverQuestOffer(Player* bot, bool pvpEnabled)
         float bestX = 0.0f;
         float bestY = 0.0f;
         uint32_t bestEntry = 0;
+        uint32_t bestQuestId = 0;
         Quest const* bestQuest = nullptr;
-        for (std::size_t i = 0; i < StarterQuestGiverCount; ++i)
+        FactionTemplateEntry const* mine = bot->GetFactionTemplateEntry();
+        QuestRelations const* relations = sObjectMgr->GetCreatureQuestRelationMapHACK();
+        if (relations)
         {
-            uint32_t const entry = StarterQuestGiverEntries[i];
-            for (uint32_t questId : sObjectMgr->GetCreatureQuestRelations(entry))
+            for (auto const& relation : *relations)
             {
+                uint32_t const entry = relation.first;
+                uint32_t const questId = relation.second;
+                if (!HasCreatureSpawn(bot->GetMapId(), entry))
+                    continue;
+                CreatureTemplate const* proto = sObjectMgr->GetCreatureTemplate(entry);
+                bool hostile = false;
+                if (proto && mine)
+                    if (FactionTemplateEntry const* theirs = sFactionTemplateStore.LookupEntry(proto->faction))
+                        hostile = theirs->IsHostileTo(mine);
                 Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
                 if (!quest)
                     continue;
                 bool const inLog = bot->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE || bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE || bot->GetQuestStatus(questId) == QUEST_STATUS_FAILED;
-                QuestOfferFacts offerFacts;
-                offerFacts.alive = true;
-                offerFacts.questGiver = true;
-                offerFacts.canTake = bot->CanTakeQuest(quest, false);
-                offerFacts.canAdd = bot->CanAddQuest(quest, false);
-                offerFacts.rewarded = bot->IsQuestRewarded(questId);
-                offerFacts.inLog = inLog;
+                bool const canTake = bot->CanTakeQuest(quest, false) && bot->CanAddQuest(quest, false) && !bot->IsQuestRewarded(questId) && !inLog;
+                if (!ConsiderQuestGiver(true, hostile, canTake))
+                    continue;
                 float x = 0.0f, y = 0.0f, z = 0.0f, distance = 1.0e9f;
-                bool const spawned = NearestSpawn(true, bot->GetMapId(), entry, bot->GetPositionX(), bot->GetPositionY(), x, y, z, distance);
-                if (PlayerbotDebug())
-                {
-                    std::string const signature = Trinity::StringFormat("starter|{}|{}|{}", entry, questId, QuestOfferReason(offerFacts));
-                    if (DebugDue(bot->GetGUID().GetCounter(), signature))
-                        WritePlayerbotLine(Trinity::StringFormat(
-                            "bot {} {} starter-giver entry={} quest={} canTake={} canAdd={} inLog={} spawned={} dist={:.1f} reason={}",
-                            bot->GetName(), bot->GetGUID().ToString(), entry, questId, offerFacts.canTake ? 1 : 0, offerFacts.canAdd ? 1 : 0,
-                            inLog ? 1 : 0, spawned ? 1 : 0, spawned ? distance : -1.0f, QuestOfferReason(offerFacts)));
-                }
-                if (!spawned || !MayOfferQuest(offerFacts) || distance >= bestDistance)
+                if (!NearestSpawn(true, bot->GetMapId(), entry, bot->GetPositionX(), bot->GetPositionY(), x, y, z, distance) || distance >= bestDistance)
                     continue;
                 bestDistance = distance;
                 bestX = x;
                 bestY = y;
                 bestEntry = entry;
+                bestQuestId = questId;
                 bestQuest = quest;
-                break;
             }
+        }
+        if (PlayerbotDebug())
+        {
+            std::string const signature = Trinity::StringFormat("giver|{}|{}", bestEntry, bestQuestId);
+            if (DebugDue(bot->GetGUID().GetCounter(), signature))
+                WritePlayerbotLine(Trinity::StringFormat(
+                    "bot {} {} quest-giver-pick entry={} quest={} dist={:.1f} map={}",
+                    bot->GetName(), bot->GetGUID().ToString(), bestEntry, bestQuestId, bestQuest ? bestDistance : -1.0f, bot->GetMapId()));
         }
         if (!bestQuest)
             return false;
@@ -1288,7 +1391,7 @@ bool DiscoverQuestOffer(Player* bot, bool pvpEnabled)
                 return true;
             }
         }
-        DebugDecision(bot, "seek", "starter-giver", nullptr, nullptr, bestEntry);
+        DebugDecision(bot, "seek", "quest-giver", nullptr, nullptr, bestEntry);
         return MoveToward(bot, bestX, bestY);
     }
     if (giverDist > INTERACTION_DISTANCE)
