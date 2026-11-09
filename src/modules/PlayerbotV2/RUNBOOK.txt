@@ -30,9 +30,15 @@ applies that directory by itself.
    .playerbot create <Name> <race> <class> <sex>
    .playerbot login <Name>
    .playerbot logout <Name>
-   Create saves level 1. A second create of the same owned level-1 name
-   returns the existing guid. Login refuses any other level. Logout and the
+   Create saves a new character at level 1 and writes guid, account, faction,
+   factory version, and start level in the same transaction. A later login
+   keeps whatever level that character has earned, from 1 through the core
+   max level. The marker is not a level lock and login does not reset it.
+   A name already used by any other character is refused. Logout and the
    kill switch remove only sessions this module opened.
+   Playerbot.Population.* is how many of that faction may be online.
+   Playerbot.Account.MaxCharacters counts persisted character rows and
+   factory marker rows on that pool account. Either count fills the cap.
 
 4. Groups
    An owned bot accepts a group invite from a non-bot player of the same
@@ -55,14 +61,17 @@ applies that directory by itself.
    Death uses the core release-spirit and corpse-reclaim checks. A ghost
    walks toward its corpse only on a valid local path.
 
-6. What is not a quest or dungeon bot
-   The module never accepts, completes, or rewards a quest. Killing a
-   creature can advance an objective only when the character is already on
-   that quest and the core kill-credit path runs. There is no quest-giver
-   gossip, no objective selection, and no dungeon script. Those need the
-   core quest-giver handlers, the quest template's creature entries, and a
-   turn-in at the NPC. Archive BotAI is not linked. No walk or kill was
-   observed in the cloud build.
+6. Starter quests, kill and gameobject only
+   Within 30 yards the bot can accept a quest when CanTakeQuest and
+   CanAddQuest both pass, walk to that giver on a valid path, attack a
+   quest-objective creature that also passes the combat checks, or Use a
+   quest-objective gameobject. Turn-in calls RewardQuest only when the
+   status is complete, the NPC is the involved giver, CanRewardQuest passes,
+   and the quest has no reward choice. Item, talk-to, currency, reputation,
+   and area-trigger objectives are refused. An unsupported objective does
+   not get free credit and does not send the bot to grind a different
+   creature. Dungeons are not scripted. No quest was completed in the cloud
+   build.
 
 7. Build used for the public check
    g++ , RelWithDebInfo

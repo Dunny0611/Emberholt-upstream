@@ -11,6 +11,7 @@
 #include "LifecyclePolicy.h"
 #include "Session/BotSession.h"
 #include "StarterCombat.h"
+#include "StarterQuest.h"
 
 #include "AccountMgr.h"
 #include "CellImpl.h"
@@ -18,7 +19,9 @@
 #include "Corpse.h"
 #include "DB2Structure.h"
 #include "DatabaseEnv.h"
+#include "GameObject.h"
 #include "GameTime.h"
+#include "LootItemType.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
 #include "Group.h"
@@ -26,6 +29,7 @@
 #include "Log.h"
 #include "MotionMaster.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "PathGenerator.h"
 #include "PetDefines.h"
 #include "Player.h"
@@ -304,6 +308,8 @@ Unit* SelectHostile(Player* bot, Player* leader, bool pvpEnabled)
     return nearest;
 }
 
+bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget, bool& blockFreeCombat);
+
 void StepOneOwnedBot(bool pvpEnabled)
 {
     if (g_logins.empty())
@@ -338,7 +344,14 @@ void StepOneOwnedBot(bool pvpEnabled)
             continue;
         }
 
-        Unit* target = SelectHostile(bot, leader, pvpEnabled);
+        Unit* questTarget = nullptr;
+        bool blockFreeCombat = false;
+        if (ActOnStarterQuest(bot, pvpEnabled, questTarget, blockFreeCombat))
+            continue;
+        if (blockFreeCombat && !questTarget)
+            continue;
+
+        Unit* target = questTarget ? questTarget : SelectHostile(bot, leader, pvpEnabled);
         if (!target)
             continue;
         HostileUse const use = JudgeHostile(FactsFor(bot, target, pvpEnabled));
@@ -406,16 +419,203 @@ bool LogoutOwned(ObjectGuid character, std::string& detail)
     return false;
 }
 
-bool TryScheduleLogin(PopulationConfig const& config, BotFaction faction, uint32_t alreadyOnline, uint32_t accountId, ObjectGuid character, uint8_t level, std::string& detail)
+bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget, bool& blockFreeCombat)
+{
+    combatTarget = nullptr;
+    blockFreeCombat = false;
+
+    auto nearestInvolved = [&](uint32_t questId) -> Creature*
+    {
+        Creature* nearest = nullptr;
+        float nearestDist = AcquireYards + 1.0f;
+        std::list<Creature*> nearby;
+        struct AnyCreature
+        {
+            Player const* bot = nullptr;
+            bool operator()(Creature const* creature) const { return creature && bot->IsWithinDist(creature, AcquireYards); }
+        } check { bot };
+        Trinity::CreatureListSearcher searcher(bot, nearby, check);
+        Cell::VisitGridObjects(bot, searcher, AcquireYards);
+        for (Creature* creature : nearby)
+        {
+            if (!sObjectMgr->GetCreatureQuestInvolvedRelations(creature->GetEntry()).HasQuest(questId))
+                continue;
+            float const distance = bot->GetDistance(creature);
+            if (distance < nearestDist)
+            {
+                nearest = creature;
+                nearestDist = distance;
+            }
+        }
+        return nearest;
+    };
+
+    for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+    {
+        uint32_t const questId = bot->GetQuestSlotQuestId(slot);
+        if (!questId)
+            continue;
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        if (!quest || bot->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
+            continue;
+        Creature* giver = nearestInvolved(questId);
+        if (!giver)
+            continue;
+        bool const choice = quest->GetRewChoiceItemsCount() > 0;
+        bool const canReward = bot->CanRewardQuest(quest, false) && bot->CanRewardQuest(quest, LootItemType::Item, 0, false);
+        if (!MayTurnInQuest(true, canReward, true, choice))
+        {
+            if (choice)
+                blockFreeCombat = true;
+            continue;
+        }
+        if (bot->GetDistance(giver) > INTERACTION_DISTANCE)
+        {
+            WalkLocalStep(bot, giver->GetPositionX(), giver->GetPositionY());
+            return true;
+        }
+        bot->RewardQuest(quest, LootItemType::Item, 0, giver, true);
+        return true;
+    }
+
+    bool sawUnsupported = false;
+    for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+    {
+        uint32_t const questId = bot->GetQuestSlotQuestId(slot);
+        if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
+            continue;
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        if (!quest)
+            continue;
+        for (QuestObjective const& objective : quest->GetObjectives())
+        {
+            if (objective.Amount > 0 && bot->GetQuestObjectiveData(objective) >= objective.Amount)
+                continue;
+            ObjectiveSupport const support = ClassifyObjective(objective.Type);
+            if (support == ObjectiveSupport::Unsupported)
+            {
+                sawUnsupported = true;
+                continue;
+            }
+            if (support == ObjectiveSupport::Kill && objective.ObjectID > 0)
+            {
+                std::list<Creature*> creatures;
+                bot->GetCreatureListWithEntryInGrid(creatures, uint32_t(objective.ObjectID), AcquireYards);
+                Creature* nearest = nullptr;
+                float nearestDist = AcquireYards + 1.0f;
+                for (Creature* creature : creatures)
+                {
+                    if (JudgeHostile(FactsFor(bot, creature, pvpEnabled)) == HostileUse::Refuse)
+                        continue;
+                    float const distance = bot->GetDistance(creature);
+                    if (distance < nearestDist)
+                    {
+                        nearest = creature;
+                        nearestDist = distance;
+                    }
+                }
+                if (!nearest)
+                {
+                    blockFreeCombat = true;
+                    return true;
+                }
+                if (PlanObjective(objective.Type, true, true) != ObjectivePlan::Attack)
+                    return true;
+                if (bot->GetDistance(nearest) > MeleeReachYards)
+                {
+                    WalkLocalStep(bot, nearest->GetPositionX(), nearest->GetPositionY());
+                    return true;
+                }
+                combatTarget = nearest;
+                return false;
+            }
+            if (support == ObjectiveSupport::GameObject && objective.ObjectID > 0)
+            {
+                std::list<GameObject*> objects;
+                bot->GetGameObjectListWithEntryInGrid(objects, uint32_t(objective.ObjectID), AcquireYards);
+                GameObject* nearest = nullptr;
+                float nearestDist = AcquireYards + 1.0f;
+                for (GameObject* object : objects)
+                {
+                    float const distance = bot->GetDistance(object);
+                    if (distance < nearestDist)
+                    {
+                        nearest = object;
+                        nearestDist = distance;
+                    }
+                }
+                if (!nearest || PlanObjective(objective.Type, nearest != nullptr, false) != ObjectivePlan::UseObject)
+                {
+                    blockFreeCombat = true;
+                    return true;
+                }
+                if (bot->GetDistance(nearest) > INTERACTION_DISTANCE)
+                {
+                    WalkLocalStep(bot, nearest->GetPositionX(), nearest->GetPositionY());
+                    return true;
+                }
+                nearest->Use(bot);
+                return true;
+            }
+        }
+    }
+    if (sawUnsupported)
+    {
+        blockFreeCombat = true;
+        return true;
+    }
+
+    std::list<Creature*> nearby;
+    struct AnyCreature
+    {
+        Player const* bot = nullptr;
+        bool operator()(Creature const* creature) const { return creature && bot->IsWithinDist(creature, AcquireYards); }
+    } check { bot };
+    Trinity::CreatureListSearcher searcher(bot, nearby, check);
+    Cell::VisitGridObjects(bot, searcher, AcquireYards);
+    Creature* giver = nullptr;
+    Quest const* offer = nullptr;
+    float giverDist = AcquireYards + 1.0f;
+    for (Creature* creature : nearby)
+    {
+        for (uint32_t questId : sObjectMgr->GetCreatureQuestRelations(creature->GetEntry()))
+        {
+            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+            if (!quest)
+                continue;
+            bool const inLog = bot->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE || bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE || bot->GetQuestStatus(questId) == QUEST_STATUS_FAILED;
+            if (!MayAcceptQuest(true, bot->CanTakeQuest(quest, false), bot->CanAddQuest(quest, false), bot->IsQuestRewarded(questId), inLog))
+                continue;
+            float const distance = bot->GetDistance(creature);
+            if (distance < giverDist)
+            {
+                giver = creature;
+                offer = quest;
+                giverDist = distance;
+            }
+        }
+    }
+    if (!giver || !offer)
+        return false;
+    if (bot->GetDistance(giver) > INTERACTION_DISTANCE)
+    {
+        WalkLocalStep(bot, giver->GetPositionX(), giver->GetPositionY());
+        return true;
+    }
+    bot->AddQuest(offer, giver);
+    return true;
+}
+
+bool TryScheduleLogin(PopulationConfig const& config, BotFaction faction, uint32_t alreadyOnline, uint32_t accountId, ObjectGuid character, uint8_t level, uint8_t maxLevel, std::string& detail)
 {
     if (!PopulationAllowsNewBot(config, faction, alreadyOnline))
     {
         detail = "population gate is closed";
         return false;
     }
-    if (level != NewBotLevel)
+    if (!LoginLevelAllowed(level, maxLevel))
     {
-        detail = "only a level-1 character is logged in";
+        detail = "level is outside the normal bounds";
         return false;
     }
     if (accountId == 0 || character.IsEmpty())
@@ -429,10 +629,20 @@ bool TryScheduleLogin(PopulationConfig const& config, BotFaction faction, uint32
         return false;
     }
 
-    QueryResult marker = CharacterDatabase.PQuery("SELECT account FROM playerbot_v2_character WHERE guid = {}", character.GetCounter());
-    if (!marker || marker->Fetch()[0].GetUInt32() != accountId)
+    QueryResult marker = CharacterDatabase.PQuery("SELECT account, faction, factory_version, start_level FROM playerbot_v2_character WHERE guid = {}", character.GetCounter());
+    MarkerRow row;
+    if (marker)
     {
-        detail = "character is not a factory row; an existing character is not logged in";
+        Field* fields = marker->Fetch();
+        row.present = true;
+        row.account = fields[0].GetUInt32();
+        row.faction = fields[1].GetUInt8();
+        row.factoryVersion = fields[2].GetUInt32();
+        row.startLevel = fields[3].GetUInt8();
+    }
+    if (!MarkerBindsOwner(row, accountId, faction))
+    {
+        detail = "factory marker does not bind this guid, account, and faction";
         return false;
     }
 

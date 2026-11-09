@@ -48,10 +48,19 @@ struct InflightCreate
 
 std::vector<InflightCreate> g_inflight;
 
-bool MarkerOwned(ObjectGuid guid, uint32_t account)
+bool OwnedMarker(ObjectGuid guid, uint32_t account, BotFaction faction)
 {
-    QueryResult marker = CharacterDatabase.PQuery("SELECT account FROM playerbot_v2_character WHERE guid = {}", guid.GetCounter());
-    return marker && marker->Fetch()[0].GetUInt32() == account;
+    QueryResult marker = CharacterDatabase.PQuery("SELECT account, faction, factory_version, start_level FROM playerbot_v2_character WHERE guid = {}", guid.GetCounter());
+    if (!marker)
+        return false;
+    Field* fields = marker->Fetch();
+    MarkerRow row;
+    row.present = true;
+    row.account = fields[0].GetUInt32();
+    row.faction = fields[1].GetUInt8();
+    row.factoryVersion = fields[2].GetUInt32();
+    row.startLevel = fields[3].GetUInt8();
+    return MarkerBindsOwner(row, account, faction);
 }
 
 void ReleaseInflight(ObjectGuid guid)
@@ -123,11 +132,11 @@ PersistResult PersistLevelOneCharacter(PersistRequest const& request)
     if (nameTaken)
     {
         CharacterCacheEntry const* entry = sCharacterCache->GetCharacterCacheByName(normalized);
-        bool const marker = entry && MarkerOwned(entry->Guid, request.character.poolAccountId);
-        switch (ClassifyName(true, marker, entry ? entry->Level : 0, entry ? entry->AccountId : 0, request.character.poolAccountId))
+        bool const sameOwned = entry && OwnedMarker(entry->Guid, request.character.poolAccountId, admission.faction);
+        switch (ClassifyName(true, sameOwned, entry ? entry->AccountId : 0, request.character.poolAccountId))
         {
             case NameUse::Reuse:
-                return { CreateRefusal::None, entry->Guid, "level-1 marker character already exists; no second row is inserted" };
+                return { CreateRefusal::None, entry->Guid, "this factory already owns that character; no second row is inserted and its level is left as it is" };
             case NameUse::Free:
                 break;
             case NameUse::Reject:
@@ -143,11 +152,14 @@ PersistResult PersistLevelOneCharacter(PersistRequest const& request)
     if (!PoolSecurityAllowed(security))
         return { CreateRefusal::PrivilegedAccount, ObjectGuid::Empty, "pool account has GM or admin security; a player account is required" };
 
-    uint32_t existing = 0;
+    uint32_t characterRows = 0;
     if (QueryResult count = CharacterDatabase.PQuery("SELECT COUNT(*) FROM characters WHERE account = {}", request.character.poolAccountId))
-        existing = uint32_t(count->Fetch()[0].GetUInt64());
-    if (existing >= request.maxOnAccount)
-        return { CreateRefusal::AccountFull, ObjectGuid::Empty, "pool account is at its character limit" };
+        characterRows = uint32_t(count->Fetch()[0].GetUInt64());
+    uint32_t markerRows = 0;
+    if (QueryResult marked = CharacterDatabase.PQuery("SELECT COUNT(*) FROM playerbot_v2_character WHERE account = {}", request.character.poolAccountId))
+        markerRows = uint32_t(marked->Fetch()[0].GetUInt64());
+    if (PersistedCapReached(markerRows, characterRows, request.maxOnAccount))
+        return { CreateRefusal::AccountFull, ObjectGuid::Empty, "persisted characters or factory markers already fill this pool account" };
 
     auto createInfo = std::make_shared<WorldPackets::Character::CharacterCreateInfo>();
     createInfo->Race = request.character.race;
@@ -167,6 +179,7 @@ PersistResult PersistLevelOneCharacter(PersistRequest const& request)
     if (!created->Create(low, createInfo.get()))
         return { CreateRefusal::CreateFailed, ObjectGuid::Empty, "Player::Create refused the character" };
 
+    // Only the unsaved new character is forced to the factory start level. Login never does this.
     if (created->GetLevel() != NewBotLevel)
         created->SetLevel(NewBotLevel, false);
     if (created->GetLevel() != NewBotLevel)
@@ -177,10 +190,11 @@ PersistResult PersistLevelOneCharacter(PersistRequest const& request)
     CharacterDatabaseTransaction characters = CharacterDatabase.BeginTransaction();
     LoginDatabaseTransaction login = LoginDatabase.BeginTransaction();
     created->SaveToDB(login, characters, true);
-    characters->PAppend("INSERT INTO playerbot_v2_character (guid, account) VALUES ({}, {})", guid.GetCounter(), request.character.poolAccountId);
+    characters->PAppend("INSERT INTO playerbot_v2_character (guid, account, faction, factory_version, start_level) VALUES ({}, {}, {}, {}, {})",
+        guid.GetCounter(), request.character.poolAccountId, uint32_t(admission.faction), FactoryVersion, uint32_t(NewBotLevel));
 
     LoginDatabasePreparedStatement* realmCharacters = LoginDatabase.GetPreparedStatement(LOGIN_REP_REALM_CHARACTERS);
-    realmCharacters->setUInt32(0, existing + 1);
+    realmCharacters->setUInt32(0, characterRows + 1);
     realmCharacters->setUInt32(1, request.character.poolAccountId);
     realmCharacters->setUInt32(2, sRealmList->GetCurrentRealmId().Realm);
     login->Append(realmCharacters);

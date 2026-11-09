@@ -16,6 +16,7 @@
 #include "ObjectMgr.h"
 #include "RBAC.h"
 #include "ScriptMgr.h"
+#include "World.h"
 #include "WorldSession.h"
 
 #include <algorithm>
@@ -96,13 +97,6 @@ bool HandleLogin(ChatHandler* handler, std::string const& name)
         handler->SetSentErrorMessage(true);
         return false;
     }
-    if (entry->Level != NewBotLevel)
-    {
-        handler->PSendSysMessage("Playerbot login refused: %s is level %u, and only a level-1 factory character is loaded", normalized.c_str(), uint32_t(entry->Level));
-        handler->SetSentErrorMessage(true);
-        return false;
-    }
-
     BotFaction const faction = FactionForStarterRace(entry->Race);
     PopulationConfig const config = ReadPopulation();
     if (entry->AccountId != PoolAccount(faction))
@@ -113,7 +107,9 @@ bool HandleLogin(ChatHandler* handler, std::string const& name)
     }
 
     std::string detail;
-    if (!TryScheduleLogin(config, faction, OnlineCount(faction), entry->AccountId, entry->Guid, entry->Level, detail))
+    uint32_t const configuredMax = sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL);
+    uint8_t const maxLevel = uint8_t(std::min<uint32_t>(255u, std::max<uint32_t>(1u, configuredMax)));
+    if (!TryScheduleLogin(config, faction, OnlineCount(faction), entry->AccountId, entry->Guid, entry->Level, maxLevel, detail))
     {
         handler->PSendSysMessage("Playerbot login refused: %s", detail.c_str());
         handler->SetSentErrorMessage(true);

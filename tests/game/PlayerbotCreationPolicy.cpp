@@ -14,6 +14,7 @@
 #include "CreationPolicy.h"
 #include "LifecyclePolicy.h"
 #include "StarterCombat.h"
+#include "StarterQuest.h"
 
 using Playerbot::V2::AcceptGroupInvite;
 using Playerbot::V2::AdmitPersistence;
@@ -38,6 +39,17 @@ using Playerbot::V2::HarmfulSpellReady;
 using Playerbot::V2::ShouldFollowLeader;
 using Playerbot::V2::RecoveryKind;
 using Playerbot::V2::ChooseRecovery;
+using Playerbot::V2::MarkerRow;
+using Playerbot::V2::MarkerBindsOwner;
+using Playerbot::V2::LoginLevelAllowed;
+using Playerbot::V2::PersistedCapReached;
+using Playerbot::V2::FactoryVersion;
+using Playerbot::V2::ClassifyObjective;
+using Playerbot::V2::ObjectiveSupport;
+using Playerbot::V2::MayAcceptQuest;
+using Playerbot::V2::MayTurnInQuest;
+using Playerbot::V2::PlanObjective;
+using Playerbot::V2::ObjectivePlan;
 using Playerbot::V2::CreateRefusal;
 using Playerbot::V2::DecideNewCharacter;
 using Playerbot::V2::NewCharacterDecision;
@@ -183,7 +195,7 @@ TEST_CASE("A closed gate returns before a character insert or a login session", 
     CHECK(created.guid.IsEmpty());
 
     std::string detail;
-    CHECK_FALSE(TryScheduleLogin(defaults, BotFaction::Alliance, 0, 50, ObjectGuid::Empty, 1, detail));
+    CHECK_FALSE(TryScheduleLogin(defaults, BotFaction::Alliance, 0, 50, ObjectGuid::Empty, 1, 60, detail));
     CHECK(detail == "population gate is closed");
 }
 
@@ -215,13 +227,62 @@ TEST_CASE("Pool accounts stay dedicated, unprivileged, and faction-matched", "[P
     CHECK_FALSE(PoolSecurityAllowed(2));
 }
 
-TEST_CASE("A taken name is reused only for an owned level-1 marker row", "[PlayerbotCreation]")
+TEST_CASE("A taken name is reused only for the same factory-owned character", "[PlayerbotCreation]")
 {
-    CHECK(ClassifyName(false, false, 1, 0, 50) == NameUse::Free);
-    CHECK(ClassifyName(true, true, 1, 50, 50) == NameUse::Reuse);
-    CHECK(ClassifyName(true, true, 60, 50, 50) == NameUse::Reject);
-    CHECK(ClassifyName(true, false, 1, 50, 50) == NameUse::Reject);
-    CHECK(ClassifyName(true, true, 1, 9, 50) == NameUse::Reject);
+    CHECK(ClassifyName(false, false, 0, 50) == NameUse::Free);
+    CHECK(ClassifyName(true, true, 50, 50) == NameUse::Reuse);
+    CHECK(ClassifyName(true, false, 50, 50) == NameUse::Reject);
+    CHECK(ClassifyName(true, true, 9, 50) == NameUse::Reject);
+}
+
+TEST_CASE("A leveled factory character can log in and an unmarked or moved one cannot", "[PlayerbotCreation]")
+{
+    CHECK(LoginLevelAllowed(1, 60));
+    CHECK(LoginLevelAllowed(20, 60));
+    CHECK(LoginLevelAllowed(60, 60));
+    CHECK_FALSE(LoginLevelAllowed(0, 60));
+    CHECK_FALSE(LoginLevelAllowed(61, 60));
+
+    MarkerRow owned;
+    owned.present = true;
+    owned.account = 50;
+    owned.faction = uint8_t(BotFaction::Alliance);
+    owned.factoryVersion = FactoryVersion;
+    owned.startLevel = 1;
+    CHECK(MarkerBindsOwner(owned, 50, BotFaction::Alliance));
+    CHECK_FALSE(MarkerBindsOwner(owned, 9, BotFaction::Alliance));
+    CHECK_FALSE(MarkerBindsOwner(owned, 50, BotFaction::Horde));
+    owned.factoryVersion = 0;
+    CHECK_FALSE(MarkerBindsOwner(owned, 50, BotFaction::Alliance));
+    owned.factoryVersion = FactoryVersion;
+    owned.startLevel = 10;
+    CHECK_FALSE(MarkerBindsOwner(owned, 50, BotFaction::Alliance));
+    owned.startLevel = 1;
+    owned.present = false;
+    CHECK_FALSE(MarkerBindsOwner(owned, 50, BotFaction::Alliance));
+
+    CHECK_FALSE(PersistedCapReached(0, 0, 10));
+    CHECK(PersistedCapReached(10, 0, 10));
+    CHECK(PersistedCapReached(0, 10, 10));
+    CHECK(PersistedCapReached(0, 0, 0));
+}
+
+TEST_CASE("Starter quests accept, kill or use, and turn in only through the core checks", "[PlayerbotCreation]")
+{
+    CHECK(ClassifyObjective(0) == ObjectiveSupport::Kill);
+    CHECK(ClassifyObjective(2) == ObjectiveSupport::GameObject);
+    CHECK(ClassifyObjective(1) == ObjectiveSupport::Unsupported);
+    CHECK(ClassifyObjective(3) == ObjectiveSupport::Unsupported);
+    CHECK(MayAcceptQuest(true, true, true, false, false));
+    CHECK_FALSE(MayAcceptQuest(true, false, true, false, false));
+    CHECK_FALSE(MayAcceptQuest(true, true, true, true, false));
+    CHECK(MayTurnInQuest(true, true, true, false));
+    CHECK_FALSE(MayTurnInQuest(true, true, true, true));
+    CHECK_FALSE(MayTurnInQuest(false, true, true, false));
+    CHECK(PlanObjective(0, true, true) == ObjectivePlan::Attack);
+    CHECK(PlanObjective(0, true, false) == ObjectivePlan::Refuse);
+    CHECK(PlanObjective(2, true, false) == ObjectivePlan::UseObject);
+    CHECK(PlanObjective(1, true, true) == ObjectivePlan::HoldUnsupported);
 }
 
 TEST_CASE("The kill switch and logout drop owned sessions only", "[PlayerbotCreation]")

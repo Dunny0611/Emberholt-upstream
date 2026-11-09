@@ -49,12 +49,20 @@ Public compile of the archive, g++ 13.3.0, against this tree's headers:
   prefers the leader's victim when that victim passes the same checks.
   Death uses the core release-spirit and corpse-reclaim checks. A ghost
   without a usable path waits. There is no travel teleport, experience
-  grant, spell teach, or quest accept/complete/reward.
+  grant, or spell teach.
 
-  Archive BotAI, the handcrafted road graph, ClassicArmor, and
-  ClassicSpellValue are not linked. Quest-giver gossip, objective choice,
-  and dungeon scripts are not implemented. This cloud build has no 70862
-  mmaps, so no walk or kill was observed.
+  New characters are saved at level 1 with a marker of guid, account,
+  faction, factory version, and start level. Login allows a later level
+  inside the core max. It does not reset level. A marker that fails the
+  account, faction, version, or start-level bind is not loaded. A name
+  used by any other character is not reused. MaxCharacters counts persisted
+  character rows and marker rows. The online cap is separate.
+
+  Starter quests use CanTakeQuest, AddQuest, objective entries, GameObject::Use,
+  and RewardQuest. Only monster and gameobject objectives are acted on.
+  Other objective types are refused. A reward choice is not selected.
+  Dungeon scripts are not implemented. This cloud build has no 70862 mmaps,
+  so no walk, kill, or turn-in was observed.
 
   Group::IsRaidForQuests keeps isRaidGroup() when no member session is a
   bot. Tap sharing and round-robin loot use BotGroupRules and match the

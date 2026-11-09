@@ -27,9 +27,10 @@ void HoldCreateSession(std::shared_ptr<BotSession> session, std::shared_ptr<bool
 void TickSessions(uint32_t diff, bool gateClosed);
 uint32_t OnlineCount(BotFaction faction);
 
-// False when the gate is closed, the level is not 1, the guid is empty, or
-// playerbot_v2_character has no matching row. A real character is not loaded.
-bool TryScheduleLogin(PopulationConfig const& config, BotFaction faction, uint32_t alreadyOnline, uint32_t accountId, ObjectGuid character, uint8_t level, std::string& detail);
+// False when the gate is closed, the level is outside 1..maxLevel, the guid is
+// empty, or the factory marker does not bind this account and faction.
+// Current level is not required to still be 1. An unmarked character is not loaded.
+bool TryScheduleLogin(PopulationConfig const& config, BotFaction faction, uint32_t alreadyOnline, uint32_t accountId, ObjectGuid character, uint8_t level, uint8_t maxLevel, std::string& detail);
 
 // Kicks one session this module opened. A guid it does not own is left alone.
 bool LogoutOwned(ObjectGuid character, std::string& detail);

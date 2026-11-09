@@ -53,14 +53,51 @@ enum class NameUse : uint8_t
     Reject
 };
 
-// A taken name is reused only when it is already our level-1 marker row on this pool account.
-inline NameUse ClassifyName(bool taken, bool markerOwned, uint8_t level, uint32_t accountId, uint32_t poolId)
+// Reuse only the same guid this factory already marked on this pool account.
+// Any other character with that name is a collision, whatever its level.
+inline NameUse ClassifyName(bool taken, bool sameCharacterOwned, uint32_t characterAccount, uint32_t poolId)
 {
     if (!taken)
         return NameUse::Free;
-    if (markerOwned && level == NewBotLevel && accountId == poolId && poolId != 0)
+    if (sameCharacterOwned && characterAccount == poolId && poolId != 0)
         return NameUse::Reuse;
     return NameUse::Reject;
+}
+
+inline constexpr uint32_t FactoryVersion = 1;
+
+struct MarkerRow
+{
+    bool present = false;
+    uint32_t account = 0;
+    uint8_t faction = 255;
+    uint32_t factoryVersion = 0;
+    uint8_t startLevel = 0;
+};
+
+// The marker records factory origin. Current level is not part of the bind.
+inline bool MarkerBindsOwner(MarkerRow const& row, uint32_t characterAccount, BotFaction raceFaction)
+{
+    return row.present
+        && row.account != 0
+        && row.account == characterAccount
+        && BotFaction(row.faction) == raceFaction
+        && raceFaction != BotFaction::Unknown
+        && row.factoryVersion == FactoryVersion
+        && row.startLevel == NewBotLevel;
+}
+
+// A new character starts at level 1. A later login may be any level the core allows.
+inline bool LoginLevelAllowed(uint8_t level, uint8_t maxLevel)
+{
+    return maxLevel >= NewBotLevel && level >= NewBotLevel && level <= maxLevel;
+}
+
+// MaxCharacters counts persisted rows, not the online cap. Either the marker
+// count or the character-table count fills the account.
+inline bool PersistedCapReached(uint32_t markerRows, uint32_t characterRows, uint32_t maxOnAccount)
+{
+    return maxOnAccount == 0 || markerRows >= maxOnAccount || characterRows >= maxOnAccount;
 }
 
 inline bool DropOwnedSession(bool sessionIsOwned, bool gateClosed)
