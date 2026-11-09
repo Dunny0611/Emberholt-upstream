@@ -177,6 +177,49 @@ inline HostileUse JudgeHostile(HostileFacts const& facts, float approachYards = 
     return HostileUse::Refuse;
 }
 
+enum class SwingAction : uint8_t
+{
+    Wait = 0,
+    Close,
+    Face,
+    Swing
+};
+
+struct SwingFacts
+{
+    bool inMeleeRange = false;
+    bool inArc = false;
+    bool attackReady = false;
+    uint32_t attackTimer = 0;
+};
+
+// Out of range, wrong facing, or a running timer must not call DoMeleeAttackIfReady.
+// That function forces the swing timer to 100ms when the check fails.
+inline SwingAction ChooseSwing(SwingFacts const& facts)
+{
+    if (!facts.inMeleeRange)
+        return SwingAction::Close;
+    if (!facts.inArc)
+        return SwingAction::Face;
+    if (!facts.attackReady)
+        return SwingAction::Wait;
+    return SwingAction::Swing;
+}
+
+inline bool SwingCallsAttack(SwingAction action)
+{
+    return action == SwingAction::Swing;
+}
+
+// Only a successful swing replaces the timer with the weapon speed. Every other
+// action leaves it alone, including the 100ms failure reset inside the core.
+inline uint32_t NextSwingTimer(SwingFacts const& facts, uint32_t weaponSpeed)
+{
+    if (ChooseSwing(facts) == SwingAction::Swing)
+        return weaponSpeed;
+    return facts.attackTimer;
+}
+
 // Nearest creature that is still legal prey inside approachYards. Friendly guards and critters are skipped.
 inline int32_t ChoosePreyIndex(HostileFacts const* facts, std::size_t count, float approachYards)
 {

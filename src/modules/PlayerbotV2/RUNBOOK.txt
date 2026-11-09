@@ -68,8 +68,10 @@ applies that directory by itself.
    If that giver has no new quest, other questgivers are checked out to 120
    yards. Otherwise the bot walks nav-mesh steps inside a 150-yard leash of
    its bind point. There is no teleport.
-   The bot faces the target, chases into melee range, and swings through the
-   normal attack timer. Players are refused unless PvP is 1 and the
+   The bot turns with SetInFront and swings only when IsWithinMeleeRange,
+   in arc, and the attack timer is ready. A running timer is not reset.
+   GetDistance already subtracts combat reach, so the stop check is
+   IsWithinMeleeRange rather than a flat 5 yards. Players are refused unless PvP is 1 and the
    player is the opposite faction. In a group the bot prefers the leader's
    victim when that victim passes the same checks, and otherwise follows the
    leader only between 8 and 40 yards on the same map.

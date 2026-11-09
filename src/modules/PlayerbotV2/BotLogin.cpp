@@ -18,6 +18,7 @@
 #include "Config.h"
 #include "Corpse.h"
 #include "DB2Structure.h"
+#include "DB2Stores.h"
 #include "DatabaseEnv.h"
 #include "GameObject.h"
 #include "GameTime.h"
@@ -38,6 +39,7 @@
 #include "RealmList.h"
 #include "SpellHistory.h"
 #include "SpellInfo.h"
+#include "ReputationMgr.h"
 #include "SpellMgr.h"
 #include "WorldSession.h"
 
@@ -282,18 +284,52 @@ bool MoveToward(Player* bot, float towardX, float towardY)
     return WalkLocalStep(bot, towardX, towardY);
 }
 
+void TryMarkAtWar(Player* bot, Unit* target)
+{
+    Creature const* creature = target->ToCreature();
+    if (!creature)
+        return;
+    FactionTemplateEntry const* factionTemplate = creature->GetFactionTemplateEntry();
+    if (!factionTemplate)
+        return;
+    FactionEntry const* faction = sFactionStore.LookupEntry(factionTemplate->Faction);
+    if (!faction || !faction->CanHaveReputation() || bot->GetReputationMgr().IsAtWar(faction))
+        return;
+    bot->GetReputationMgr().SetAtWar(uint32(faction->ReputationIndex), true);
+}
+
+SwingFacts SwingFor(Player const* bot, Unit const* target)
+{
+    SwingFacts facts;
+    facts.inMeleeRange = bot->IsWithinMeleeRange(target);
+    facts.inArc = bot->HasInArc(2.0f * float(M_PI) / 3.0f, target) || bot->IsWithinBoundaryRadius(target);
+    facts.attackReady = bot->isAttackReady(BASE_ATTACK);
+    facts.attackTimer = bot->getAttackTimer(BASE_ATTACK);
+    return facts;
+}
+
 void EngageHostile(Player* bot, Unit* target)
 {
-    bot->SetFacingToObject(target);
-    if (!bot->IsWithinMeleeRange(target))
+    SwingFacts swing = SwingFor(bot, target);
+    SwingAction action = ChooseSwing(swing);
+    if (action == SwingAction::Close)
+        return;
+    if (action == SwingAction::Face)
     {
-        if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != CHASE_MOTION_TYPE)
-            bot->GetMotionMaster()->MoveChase(target);
+        // MoveFace on a clientless player can finish with duration 0 and never store orientation.
+        bot->SetInFront(target);
+        swing.inArc = true;
+        action = ChooseSwing(swing);
     }
-    if (bot->Attack(target, true))
-        bot->DoMeleeAttackIfReady();
-    else if (bot->GetVictim() == target)
-        bot->DoMeleeAttackIfReady();
+    if (!SwingCallsAttack(action))
+        return;
+    if (!bot->IsValidAttackTarget(target))
+        TryMarkAtWar(bot, target);
+    if (!bot->IsValidAttackTarget(target))
+        return;
+    if (bot->GetVictim() != target || !bot->HasUnitState(UNIT_STATE_MELEE_ATTACKING))
+        bot->Attack(target, true);
+    bot->DoMeleeAttackIfReady();
 }
 
 uint32_t FindKnownHarmfulSpell(Player* bot, Unit* target)
@@ -533,6 +569,58 @@ bool DiscoverQuestOffer(Player* bot, bool pvpEnabled);
 bool WanderInsideLeash(Player* bot);
 void TryLootQuestItems(Player* bot, Unit* target);
 
+uint32_t HeldQuestCount(Player const* bot)
+{
+    uint32_t held = 0;
+    for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        if (bot->GetQuestSlotQuestId(slot))
+            ++held;
+    return held;
+}
+
+std::string QuestLogText(Player const* bot)
+{
+    std::string text;
+    for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+    {
+        uint32_t const questId = bot->GetQuestSlotQuestId(slot);
+        if (!questId)
+            continue;
+        if (!text.empty())
+            text += ',';
+        text += Trinity::StringFormat("{}:{}", questId, uint32(bot->GetQuestStatus(questId)));
+    }
+    return text.empty() ? "empty" : text;
+}
+
+void DebugQuestBranch(Player const* bot, char const* action)
+{
+    if (!PlayerbotDebug() || !bot)
+        return;
+    WritePlayerbotLine(Trinity::StringFormat(
+        "bot {} {} quest-branch log={} held={} action={}",
+        bot->GetName(), bot->GetGUID().ToString(), QuestLogText(bot), HeldQuestCount(bot), action ? action : ""));
+}
+
+void DebugMelee(Player const* bot, Unit const* target)
+{
+    if (!PlayerbotDebug() || !bot || !target)
+        return;
+    SwingFacts const swing = SwingFor(bot, target);
+    Unit const* victim = bot->GetVictim();
+    std::string const signature = Trinity::StringFormat("melee|{}|{}|{}|{}", target->GetEntry(), swing.inMeleeRange ? 1 : 0, swing.inArc ? 1 : 0, bot->IsValidAttackTarget(target) ? 1 : 0);
+    if (!DebugDue(bot->GetGUID().GetCounter(), signature))
+        return;
+    WritePlayerbotLine(Trinity::StringFormat(
+        "bot {} {} melee-check attackTimer={} ready={} inMeleeRange={} inArc={} validAttack={} victim={} meleeState={} moving={} targetHp={}/{} botHp={}/{} botCombat={} targetCombat={} orient={:.3f} action={}",
+        bot->GetName(), bot->GetGUID().ToString(), swing.attackTimer, swing.attackReady ? 1 : 0, swing.inMeleeRange ? 1 : 0,
+        swing.inArc ? 1 : 0, bot->IsValidAttackTarget(target) ? 1 : 0, victim ? victim->GetGUID().ToString() : "none",
+        bot->HasUnitState(UNIT_STATE_MELEE_ATTACKING) ? 1 : 0, bot->HasUnitState(UNIT_STATE_MOVING) ? 1 : 0,
+        target->GetHealth(), target->GetMaxHealth(), bot->GetHealth(), bot->GetMaxHealth(),
+        bot->IsInCombat() ? 1 : 0, target->IsInCombat() ? 1 : 0, bot->GetOrientation(),
+        uint32(ChooseSwing(swing))));
+}
+
 void DebugDecision(Player const* bot, char const* state, char const* reason, Unit const* target, ScanStats const* scan, uint32_t seekEntry = 0)
 {
     if (!sConfigMgr->GetBoolDefault("Playerbot.Debug"sv, false) || !bot)
@@ -622,6 +710,13 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
             continue;
         }
 
+        DebugQuestBranch(bot, SeekQuestBeforePrey(HeldQuestCount(bot)) ? "empty-log" : "have-log");
+        if (SeekQuestBeforePrey(HeldQuestCount(bot)) && DiscoverQuestOffer(bot, pvpEnabled))
+        {
+            DebugDecision(bot, "seek", "quest-offer", nullptr, nullptr);
+            continue;
+        }
+
         Unit* questTarget = nullptr;
         if (ActOnStarterQuest(bot, pvpEnabled, questTarget))
         {
@@ -631,7 +726,7 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
 
         ScanStats scan;
         Unit* target = questTarget ? questTarget : SelectHostile(bot, leader, pvpEnabled, scan);
-        if (target && bot->GetDistance(target) > MeleeReachYards)
+        if (target && !bot->IsWithinMeleeRange(target))
         {
             if (MoveToward(bot, target->GetPositionX(), target->GetPositionY()))
             {
@@ -654,6 +749,7 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
             }
             EngageHostile(bot, target);
             TryLootQuestItems(bot, target);
+            DebugMelee(bot, target);
             DebugDecision(bot, "melee", HostileRefuseReason(facts), target, &scan);
             continue;
         }
@@ -1139,7 +1235,62 @@ bool DiscoverQuestOffer(Player* bot, bool pvpEnabled)
     }
     DebugQuestHistogram(bot, questHist);
     if (!giver || !offer)
-        return false;
+    {
+        float bestDistance = 1.0e9f;
+        float bestX = 0.0f;
+        float bestY = 0.0f;
+        uint32_t bestEntry = 0;
+        Quest const* bestQuest = nullptr;
+        for (std::size_t i = 0; i < StarterQuestGiverCount; ++i)
+        {
+            uint32_t const entry = StarterQuestGiverEntries[i];
+            for (uint32_t questId : sObjectMgr->GetCreatureQuestRelations(entry))
+            {
+                Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+                if (!quest)
+                    continue;
+                bool const inLog = bot->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE || bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE || bot->GetQuestStatus(questId) == QUEST_STATUS_FAILED;
+                QuestOfferFacts offerFacts;
+                offerFacts.alive = true;
+                offerFacts.questGiver = true;
+                offerFacts.canTake = bot->CanTakeQuest(quest, false);
+                offerFacts.canAdd = bot->CanAddQuest(quest, false);
+                offerFacts.rewarded = bot->IsQuestRewarded(questId);
+                offerFacts.inLog = inLog;
+                float x = 0.0f, y = 0.0f, z = 0.0f, distance = 1.0e9f;
+                bool const spawned = NearestSpawn(true, bot->GetMapId(), entry, bot->GetPositionX(), bot->GetPositionY(), x, y, z, distance);
+                if (PlayerbotDebug())
+                {
+                    std::string const signature = Trinity::StringFormat("starter|{}|{}|{}", entry, questId, QuestOfferReason(offerFacts));
+                    if (DebugDue(bot->GetGUID().GetCounter(), signature))
+                        WritePlayerbotLine(Trinity::StringFormat(
+                            "bot {} {} starter-giver entry={} quest={} canTake={} canAdd={} inLog={} spawned={} dist={:.1f} reason={}",
+                            bot->GetName(), bot->GetGUID().ToString(), entry, questId, offerFacts.canTake ? 1 : 0, offerFacts.canAdd ? 1 : 0,
+                            inLog ? 1 : 0, spawned ? 1 : 0, spawned ? distance : -1.0f, QuestOfferReason(offerFacts)));
+                }
+                if (!spawned || !MayOfferQuest(offerFacts) || distance >= bestDistance)
+                    continue;
+                bestDistance = distance;
+                bestX = x;
+                bestY = y;
+                bestEntry = entry;
+                bestQuest = quest;
+                break;
+            }
+        }
+        if (!bestQuest)
+            return false;
+        for (Creature* creature : LiveEntries(bot, INTERACTION_DISTANCE, bestEntry))
+        {
+            if (creature && bot->GetDistance(creature) <= INTERACTION_DISTANCE)
+            {
+                bot->AddQuest(bestQuest, creature);
+                return true;
+            }
+        }
+        DebugDecision(bot, "seek", "starter-giver", nullptr, nullptr, bestEntry);
+        return MoveToward(bot, bestX, bestY);
+    }
     if (giverDist > INTERACTION_DISTANCE)
         return MoveToward(bot, giver->GetPositionX(), giver->GetPositionY());
     bot->AddQuest(offer, giver);

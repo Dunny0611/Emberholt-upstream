@@ -154,6 +154,16 @@ inline ObjectivePlan PlanObjective(uint8_t type, bool entryPresent, bool hostile
     return ObjectivePlan::Skip;
 }
 
+// Classic starters: Sten Stoutarm (179), Balir Frosthammer (170), Kaltunk (4641), Gornek (turn-in and follow-ups).
+inline constexpr uint32_t StarterQuestGiverEntries[] = { 658u, 713u, 10176u, 3143u };
+inline constexpr std::size_t StarterQuestGiverCount = 4;
+
+// An empty log has to walk to a giver before grinding. A held quest keeps its own objective.
+inline bool SeekQuestBeforePrey(uint32_t heldQuests)
+{
+    return heldQuests == 0;
+}
+
 // Kill, gameobject, and talk objectives have a place to walk to. An item objective does not.
 inline bool ObjectiveNeedsSeek(uint8_t type)
 {

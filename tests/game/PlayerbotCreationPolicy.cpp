@@ -40,6 +40,12 @@ using Playerbot::V2::HostileFacts;
 using Playerbot::V2::HostileRefuseReason;
 using Playerbot::V2::HostileUse;
 using Playerbot::V2::ChoosePreyIndex;
+using Playerbot::V2::ChooseSwing;
+using Playerbot::V2::NextSwingTimer;
+using Playerbot::V2::SeekQuestBeforePrey;
+using Playerbot::V2::SwingAction;
+using Playerbot::V2::SwingCallsAttack;
+using Playerbot::V2::SwingFacts;
 using Playerbot::V2::ChooseSeek;
 using Playerbot::V2::JudgeHostile;
 using Playerbot::V2::LeashedStep;
@@ -688,6 +694,42 @@ TEST_CASE("A wolf outside 30 yards is sought, and friendly guards stay refused",
     LeashedStep(0.0f, 0.0f, 140.0f, 0.0f, 0.0f, 20.0f, WanderLeashYards, x, y);
     CHECK(x > 149.0f);
     CHECK(x < 151.0f);
+}
+
+TEST_CASE("A running melee timer is not reset, and an empty quest log seeks a giver first", "[PlayerbotCreation]")
+{
+    SwingFacts waiting;
+    waiting.inMeleeRange = true;
+    waiting.inArc = true;
+    waiting.attackReady = false;
+    waiting.attackTimer = 1500;
+    CHECK(ChooseSwing(waiting) == SwingAction::Wait);
+    CHECK_FALSE(SwingCallsAttack(ChooseSwing(waiting)));
+    CHECK(NextSwingTimer(waiting, 2000) == 1500);
+
+    SwingFacts closing = waiting;
+    closing.inMeleeRange = false;
+    closing.attackReady = true;
+    closing.attackTimer = 0;
+    CHECK(ChooseSwing(closing) == SwingAction::Close);
+    CHECK(NextSwingTimer(closing, 2000) == 0);
+
+    SwingFacts facing = waiting;
+    facing.attackReady = true;
+    facing.attackTimer = 0;
+    facing.inArc = false;
+    CHECK(ChooseSwing(facing) == SwingAction::Face);
+    CHECK(NextSwingTimer(facing, 2000) == 0);
+
+    SwingFacts ready = waiting;
+    ready.attackReady = true;
+    ready.attackTimer = 0;
+    CHECK(ChooseSwing(ready) == SwingAction::Swing);
+    CHECK(SwingCallsAttack(ChooseSwing(ready)));
+    CHECK(NextSwingTimer(ready, 2000) == 2000);
+
+    CHECK(SeekQuestBeforePrey(0));
+    CHECK_FALSE(SeekQuestBeforePrey(1));
 }
 
 TEST_CASE("A class spell is cast only when it is already known, harmful, and in range", "[PlayerbotCreation]")
