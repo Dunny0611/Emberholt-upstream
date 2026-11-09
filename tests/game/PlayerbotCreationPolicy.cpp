@@ -46,6 +46,7 @@ using Playerbot::V2::LoginLevelAllowed;
 using Playerbot::V2::PersistedCapReached;
 using Playerbot::V2::FactoryVersion;
 using Playerbot::V2::AppendAccountIds;
+using Playerbot::V2::DecisionIntervalMs;
 using Playerbot::V2::ClassifyObjective;
 using Playerbot::V2::ObjectiveSupport;
 using Playerbot::V2::MayAcceptQuest;
@@ -295,6 +296,8 @@ TEST_CASE("Starter quests accept, kill or use, and turn in only through the core
     CHECK(accounts[0] == 11);
     CHECK(accounts[1] == 12);
     CHECK(accounts[2] == 13);
+    CHECK(DecisionIntervalMs >= 250);
+    CHECK(DecisionIntervalMs <= 500);
 }
 
 TEST_CASE("The kill switch and logout drop owned sessions only", "[PlayerbotCreation]")

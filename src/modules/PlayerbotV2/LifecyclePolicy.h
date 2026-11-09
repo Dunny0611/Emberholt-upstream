@@ -22,6 +22,7 @@ namespace Playerbot::V2
 {
 inline constexpr uint32_t AiStepsPerTick = 1;
 inline constexpr uint32_t AiBudgetMs = 5;
+inline constexpr uint32_t DecisionIntervalMs = 400;
 
 enum class PoolScreen : uint8_t
 {

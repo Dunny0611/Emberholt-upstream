@@ -31,7 +31,8 @@ Playerbot.Account.HordeIds =
 # Attack an opposite-faction player only when this is 1. Default refuses every player.
 Playerbot.PvP = 0
 
-# 1 logs one decision line per bot tick: state, target, refuse reason, path, corpse, quest.
+# 1 logs a decision about every 400ms. Identical lines are sampled.
+# The line includes grid, raw, kept, and refused counts from a phase-ignoring grid scan.
 # Also add to worldserver.conf: Logger.playerbot=3,Console Server
 Playerbot.Debug = 0
 

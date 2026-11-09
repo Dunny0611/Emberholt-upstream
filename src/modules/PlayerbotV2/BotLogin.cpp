@@ -28,6 +28,7 @@
 #include "Group.h"
 #include "GroupMgr.h"
 #include "Log.h"
+#include "Map.h"
 #include "MotionMaster.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
@@ -45,6 +46,7 @@
 #include <cmath>
 #include <list>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace Playerbot::V2
@@ -61,6 +63,7 @@ struct LiveLogin
 {
     std::shared_ptr<BotSession> session;
     BotFaction faction = BotFaction::Unknown;
+    uint32_t decisionMs = 0;
 };
 
 std::vector<PendingCreate> g_creates;
@@ -289,11 +292,41 @@ bool RecoverOwnedBot(Player* bot)
     return true;
 }
 
-Unit* SelectHostile(Player* bot, Player* leader, bool pvpEnabled)
+struct ScanStats
+{
+    bool gridLoaded = false;
+    uint32_t raw = 0;
+    uint32_t kept = 0;
+    uint32_t refused = 0;
+};
+
+std::list<Creature*> CollectCreatures(Player* bot, float range, ScanStats& stats, FindCreatureAliveState alive = FindCreatureAliveState::Alive)
+{
+    Map* map = bot->GetMap();
+    map->LoadGridsInRange(bot->GetPositionX(), bot->GetPositionY(), range);
+    stats.gridLoaded = map->IsGridLoaded(*bot);
+    FindCreatureOptions options;
+    options.IgnorePhases = true;
+    options.IsAlive = alive;
+    std::list<Creature*> creatures;
+    bot->GetCreatureListWithOptionsInGrid(creatures, range, options);
+    stats.raw = uint32_t(creatures.size());
+    return creatures;
+}
+
+Unit* SelectHostile(Player* bot, Player* leader, bool pvpEnabled, ScanStats& stats)
 {
     auto usable = [&](Unit* unit)
     {
-        return unit && unit != bot && JudgeHostile(FactsFor(bot, unit, pvpEnabled)) != HostileUse::Refuse;
+        if (!unit || unit == bot)
+            return false;
+        if (JudgeHostile(FactsFor(bot, unit, pvpEnabled)) == HostileUse::Refuse)
+        {
+            ++stats.refused;
+            return false;
+        }
+        ++stats.kept;
+        return true;
     };
 
     if (leader)
@@ -314,37 +347,19 @@ Unit* SelectHostile(Player* bot, Player* leader, bool pvpEnabled)
         }
     };
 
+    for (Creature* creature : CollectCreatures(bot, AcquireYards, stats))
+        consider(creature);
+
     for (Unit* attacker : bot->getAttackers())
         consider(attacker);
 
-    std::list<Creature*> nearby;
-    struct NearbyCreature
-    {
-        Player const* bot = nullptr;
-        float range = 0.0f;
-        bool operator()(Creature const* creature) const
-        {
-            return creature && bot->IsWithinDist(creature, range);
-        }
-    } check { bot, AcquireYards };
-    Trinity::CreatureListSearcher searcher(bot, nearby, check);
-    Cell::VisitGridObjects(bot, searcher, AcquireYards);
-    for (Creature* creature : nearby)
-        consider(creature);
-
-    if (pvpEnabled)
-    {
-        for (Unit* attacker : bot->getAttackers())
-            if (attacker && attacker->GetTypeId() == TYPEID_PLAYER)
-                consider(attacker);
-    }
     return nearest;
 }
 
 bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget);
 void TryLootQuestItems(Player* bot, Unit* target);
 
-void DebugDecision(Player const* bot, char const* state, char const* reason, Unit const* target)
+void DebugDecision(Player const* bot, char const* state, char const* reason, Unit const* target, ScanStats const* scan)
 {
     if (!sConfigMgr->GetBoolDefault("Playerbot.Debug"sv, false) || !bot)
         return;
@@ -353,18 +368,40 @@ void DebugDecision(Player const* bot, char const* state, char const* reason, Uni
         corpseDistance = bot->GetExactDist(bot->GetCorpseLocation());
     uint32_t const entry = target && target->GetTypeId() == TYPEID_UNIT ? target->GetEntry() : 0;
     uint32_t const level = target ? target->GetLevel() : 0;
+    std::string const signature = Trinity::StringFormat("{}|{}|{}|{}|{}", state, reason ? reason : "", entry,
+        scan ? scan->raw : 0, scan && scan->gridLoaded ? 1 : 0);
+    struct LastLine
+    {
+        std::string signature;
+        uint32_t suppressed = 0;
+    };
+    static std::unordered_map<uint64_t, LastLine> last;
+    LastLine& previous = last[bot->GetGUID().GetCounter()];
+    if (previous.signature == signature)
+    {
+        ++previous.suppressed;
+        if (previous.suppressed % 8 != 0)
+            return;
+    }
+    else
+    {
+        previous.signature = signature;
+        previous.suppressed = 0;
+    }
     std::string const line = Trinity::StringFormat(
-        "bot {} {} state={} reason={} target={} entry={} level={} ghost={} corpseDist={:.1f}",
+        "bot {} {} state={} reason={} target={} entry={} level={} ghost={} corpseDist={:.1f} grid={} raw={} kept={} refused={} repeated={}",
         bot->GetName(), bot->GetGUID().ToString(), state, reason ? reason : "",
         target ? target->GetGUID().ToString() : "none", entry, level,
-        bot->HasPlayerFlag(PLAYER_FLAGS_GHOST), corpseDistance);
+        bot->HasPlayerFlag(PLAYER_FLAGS_GHOST), corpseDistance,
+        scan && scan->gridLoaded ? 1 : 0, scan ? scan->raw : 0, scan ? scan->kept : 0, scan ? scan->refused : 0,
+        previous.suppressed);
     if (sLog->ShouldLog("playerbot", LOG_LEVEL_INFO))
         TC_LOG_INFO("playerbot", "{}", line);
     else
         TC_LOG_INFO("server.worldserver", "playerbot {}", line);
 }
 
-void StepOneOwnedBot(bool pvpEnabled)
+void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
 {
     if (g_logins.empty())
         return;
@@ -375,20 +412,24 @@ void StepOneOwnedBot(bool pvpEnabled)
     {
         if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count() >= AiBudgetMs)
             break;
-        LiveLogin const& live = g_logins[cursor % g_logins.size()];
+        LiveLogin& live = g_logins[cursor % g_logins.size()];
         cursor = (cursor + 1) % g_logins.size();
+        live.decisionMs += diff;
+        if (live.decisionMs < DecisionIntervalMs)
+            continue;
+        live.decisionMs = 0;
         Player* bot = live.session->GetPlayer();
         if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported())
         {
             if (bot)
-                DebugDecision(bot, "skip", bot->IsBeingTeleported() ? "teleporting" : "not-in-world", nullptr);
+                DebugDecision(bot, "skip", bot->IsBeingTeleported() ? "teleporting" : "not-in-world", nullptr, nullptr);
             continue;
         }
         ++steps;
         if (RecoverOwnedBot(bot))
         {
             DebugDecision(bot, bot->HasPlayerFlag(PLAYER_FLAGS_GHOST) ? "ghost" : "dead",
-                bot->HasCorpse() ? "recovery" : "no-corpse-location", nullptr);
+                bot->HasCorpse() ? "recovery" : "no-corpse-location", nullptr, nullptr);
             continue;
         }
 
@@ -403,21 +444,22 @@ void StepOneOwnedBot(bool pvpEnabled)
         if (ShouldFollowLeader(leader != nullptr, leaderAlive, sameMap, bot->IsInCombat(), leaderDistance))
         {
             WalkLocalStep(bot, leader->GetPositionX(), leader->GetPositionY());
-            DebugDecision(bot, "follow", "leader", leader);
+            DebugDecision(bot, "follow", "leader", leader, nullptr);
             continue;
         }
 
         Unit* questTarget = nullptr;
         if (ActOnStarterQuest(bot, pvpEnabled, questTarget))
         {
-            DebugDecision(bot, "quest", "acted", questTarget);
+            DebugDecision(bot, "quest", "acted", questTarget, nullptr);
             continue;
         }
 
-        Unit* target = questTarget ? questTarget : SelectHostile(bot, leader, pvpEnabled);
+        ScanStats scan;
+        Unit* target = questTarget ? questTarget : SelectHostile(bot, leader, pvpEnabled, scan);
         if (!target)
         {
-            DebugDecision(bot, "idle", "no-legal-target", nullptr);
+            DebugDecision(bot, "idle", scan.gridLoaded ? "no-legal-target" : "grid-not-loaded", nullptr, &scan);
             continue;
         }
         HostileFacts const facts = FactsFor(bot, target, pvpEnabled);
@@ -431,17 +473,17 @@ void StepOneOwnedBot(bool pvpEnabled)
                     SpellCastResult const cast = bot->CastSpell(CastSpellTargetArg(target), spellId);
                     if (cast == SPELL_CAST_OK)
                     {
-                        DebugDecision(bot, "spell", "cast", target);
+                        DebugDecision(bot, "spell", "cast", target, &scan);
                         continue;
                     }
                 }
             }
             EngageHostile(bot, target);
             TryLootQuestItems(bot, target);
-            DebugDecision(bot, use == HostileUse::Melee ? "melee" : "chase", HostileRefuseReason(facts), target);
+            DebugDecision(bot, use == HostileUse::Melee ? "melee" : "chase", HostileRefuseReason(facts), target, &scan);
         }
         else
-            DebugDecision(bot, "refused", HostileRefuseReason(facts), target);
+            DebugDecision(bot, "refused", HostileRefuseReason(facts), target, &scan);
     }
 }
 
@@ -474,7 +516,7 @@ void TickSessions(uint32_t diff, bool gateClosed)
     if (!gateClosed)
     {
         AcceptPendingInvites();
-        StepOneOwnedBot(sConfigMgr->GetBoolDefault("Playerbot.PvP"sv, false));
+        StepOneOwnedBot(sConfigMgr->GetBoolDefault("Playerbot.PvP"sv, false), diff);
     }
 }
 
@@ -516,15 +558,8 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
     {
         Creature* nearest = nullptr;
         float nearestDist = AcquireYards + 1.0f;
-        std::list<Creature*> nearby;
-        struct AnyCreature
-        {
-            Player const* bot = nullptr;
-            bool operator()(Creature const* creature) const { return creature && bot->IsWithinDist(creature, AcquireYards); }
-        } check { bot };
-        Trinity::CreatureListSearcher searcher(bot, nearby, check);
-        Cell::VisitGridObjects(bot, searcher, AcquireYards);
-        for (Creature* creature : nearby)
+        ScanStats ignored;
+        for (Creature* creature : CollectCreatures(bot, AcquireYards, ignored))
         {
             if (!sObjectMgr->GetCreatureQuestInvolvedRelations(creature->GetEntry()).HasQuest(questId))
                 continue;
@@ -579,17 +614,8 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
                 continue;
             if (support == ObjectiveSupport::Item)
             {
-                std::list<Creature*> corpses;
-                struct DeadNearby
-                {
-                    Player const* bot = nullptr;
-                    bool operator()(Creature const* creature) const
-                    {
-                        return creature && !creature->IsAlive() && bot->IsWithinDist(creature, INTERACTION_DISTANCE);
-                    }
-                } deadCheck { bot };
-                Trinity::CreatureListSearcher deadSearcher(bot, corpses, deadCheck);
-                Cell::VisitGridObjects(bot, deadSearcher, INTERACTION_DISTANCE);
+                ScanStats ignoredDead;
+                std::list<Creature*> corpses = CollectCreatures(bot, INTERACTION_DISTANCE, ignoredDead, FindCreatureAliveState::Dead);
                 bool looted = false;
                 for (Creature* creature : corpses)
                 {
@@ -604,8 +630,9 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
             }
             if (support == ObjectiveSupport::Talk && objective.ObjectID > 0)
             {
-                std::list<Creature*> speakers;
-                bot->GetCreatureListWithEntryInGrid(speakers, uint32_t(objective.ObjectID), AcquireYards);
+                ScanStats ignoredTalk;
+                std::list<Creature*> speakers = CollectCreatures(bot, AcquireYards, ignoredTalk);
+                speakers.remove_if([entry = uint32_t(objective.ObjectID)](Creature* creature) { return creature->GetEntry() != entry; });
                 Creature* speaker = nullptr;
                 float speakerDist = AcquireYards + 1.0f;
                 for (Creature* creature : speakers)
@@ -629,8 +656,9 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
             }
             if (support == ObjectiveSupport::Kill && objective.ObjectID > 0)
             {
-                std::list<Creature*> creatures;
-                bot->GetCreatureListWithEntryInGrid(creatures, uint32_t(objective.ObjectID), AcquireYards);
+                ScanStats ignoredKill;
+                std::list<Creature*> creatures = CollectCreatures(bot, AcquireYards, ignoredKill);
+                creatures.remove_if([entry = uint32_t(objective.ObjectID)](Creature* creature) { return creature->GetEntry() != entry; });
                 Creature* nearest = nullptr;
                 float nearestDist = AcquireYards + 1.0f;
                 for (Creature* creature : creatures)
@@ -658,8 +686,11 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
             }
             if (support == ObjectiveSupport::GameObject && objective.ObjectID > 0)
             {
+                FindGameObjectOptions objectOptions;
+                objectOptions.IgnorePhases = true;
+                objectOptions.GameObjectId = uint32_t(objective.ObjectID);
                 std::list<GameObject*> objects;
-                bot->GetGameObjectListWithEntryInGrid(objects, uint32_t(objective.ObjectID), AcquireYards);
+                bot->GetGameObjectListWithOptionsInGrid(objects, AcquireYards, objectOptions);
                 GameObject* nearest = nullptr;
                 float nearestDist = AcquireYards + 1.0f;
                 for (GameObject* object : objects)
@@ -684,14 +715,8 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
         }
     }
 
-    std::list<Creature*> nearby;
-    struct AnyCreature
-    {
-        Player const* bot = nullptr;
-        bool operator()(Creature const* creature) const { return creature && bot->IsWithinDist(creature, AcquireYards); }
-    } check { bot };
-    Trinity::CreatureListSearcher searcher(bot, nearby, check);
-    Cell::VisitGridObjects(bot, searcher, AcquireYards);
+    ScanStats ignoredGivers;
+    std::list<Creature*> nearby = CollectCreatures(bot, AcquireYards, ignoredGivers);
     Creature* giver = nullptr;
     Quest const* offer = nullptr;
     float giverDist = AcquireYards + 1.0f;
