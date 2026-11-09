@@ -25,8 +25,16 @@ Public compile of the archive, g++ 13.3.0, against this tree's headers:
     BotPopulationManager.cpp: ‘class Group’ has no member named ‘ReorderMembers’
     PlayerbotV2.cpp: fatal error: BotGroupRules.h: No such file or directory
 
-  LoginQueryHolder is private inside CharacterHandler.cpp. Lifting it is a
-  login-path rewrite and is not in this branch. ReorderMembers and
-  BotGroupRules.h are further core hooks, not copied. ClassicArmor.h,
-  ClassicSpellValue.h, and the road graph were not compiled. Core mmaps are
-  not regenerated 70862 data, so this module does not walk a bot.
+  LoginQueryHolder now has a public header. Initialize() stays in
+  CharacterHandler.cpp. BotSession.cpp syntax-checks: it drops packets,
+  can submit that holder, and does not call InitializeSession, query a
+  battlenet account, or sign guild charters. The module still does not
+  construct a session or call BeginLogin.
+
+  Group::IsRaidForQuests keeps isRaidGroup() when no member session is a
+  bot. Tap sharing and round-robin loot use BotGroupRules and match the
+  previous walk in that case. ReorderMembers, BotPopulationManager,
+  ClassicArmor, ClassicSpellValue, and the road graph are not imported.
+  CharacterFactory.h only admits a request. It does not call Player::Create
+  or SaveToDB. Core mmaps are not regenerated 70862 data, so this module
+  does not walk a bot.

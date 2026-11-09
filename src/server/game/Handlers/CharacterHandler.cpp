@@ -16,6 +16,7 @@
  */
 
 #include "WorldSession.h"
+#include "LoginQueryHolder.h"
 #include "AccountMgr.h"
 #include "ArenaTeam.h"
 #include "ArenaTeamMgr.h"
@@ -70,19 +71,6 @@
 #include "World.h"
 #include <boost/circular_buffer.hpp>
 #include <sstream>
-
-class LoginQueryHolder : public CharacterDatabaseQueryHolder
-{
-    private:
-        uint32 m_accountId;
-        ObjectGuid m_guid;
-    public:
-        LoginQueryHolder(uint32 accountId, ObjectGuid guid)
-            : m_accountId(accountId), m_guid(guid) { }
-        ObjectGuid GetGuid() const { return m_guid; }
-        uint32 GetAccountId() const { return m_accountId; }
-        bool Initialize();
-};
 
 bool LoginQueryHolder::Initialize()
 {

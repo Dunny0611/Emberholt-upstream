@@ -1989,8 +1989,14 @@ class TC_GAME_API WorldSession
         TransactionCallback& AddTransactionCallback(TransactionCallback&& callback);
         SQLQueryHolderCallback& AddQueryHolderCallback(SQLQueryHolderCallback&& callback);
 
-    private:
+    protected:
+        void SetPlayerLoading(ObjectGuid guid) { m_playerLoading = guid; }
+        void ClearPlayerLoading() { m_playerLoading.Clear(); }
+        void MarkForceExit() { forceExit = true; }
+        bool IsForceExit() const { return forceExit; }
         void ProcessQueryCallbacks();
+
+    private:
 
         QueryCallbackProcessor _queryProcessor;
 
