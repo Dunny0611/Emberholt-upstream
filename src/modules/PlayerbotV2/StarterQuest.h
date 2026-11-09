@@ -114,9 +114,175 @@ inline std::string FormatQuestGiverHistogram(QuestGiverHistogram const& histogra
         + " noOffer=" + std::to_string(histogram.noOffer);
 }
 
+inline bool MayTurnInQuest(bool statusComplete, bool canReward, bool giverInvolved, bool rewardChoiceRequired, bool choiceSelected)
+{
+    if (!statusComplete || !canReward || !giverInvolved)
+        return false;
+    return !rewardChoiceRequired || choiceSelected;
+}
+
 inline bool MayTurnInQuest(bool statusComplete, bool canReward, bool giverInvolved, bool rewardChoiceRequired)
 {
-    return statusComplete && canReward && giverInvolved && !rewardChoiceRequired;
+    return MayTurnInQuest(statusComplete, canReward, giverInvolved, rewardChoiceRequired, false);
+}
+
+// Client gossip uses the NPC combat reach plus 4 yards (Player::GetNPCIfCanInteractWith).
+inline float GossipInteractYards(float combatReach)
+{
+    return combatReach + 4.0f;
+}
+
+struct QuestEnderFact
+{
+    uint32_t questId = 0;
+    uint32_t entry = 0;
+    bool fromEnderTable = false;
+    bool spawned = false;
+    uint32_t mapId = 0;
+    float distance = 0.0f;
+};
+
+// creature_questender / gameobject_questender rows only. Starter rows are ignored.
+// A spawned ender on this map beats a spawn point. The nearest row wins.
+inline int32_t SelectQuestEnder(QuestEnderFact const* rows, std::size_t count, uint32_t questId, uint32_t mapId)
+{
+    int32_t spawned = -1;
+    float spawnedDistance = 1.0e12f;
+    int32_t any = -1;
+    float anyDistance = 1.0e12f;
+    if (!rows)
+        return -1;
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        QuestEnderFact const& row = rows[i];
+        if (row.questId != questId || !row.fromEnderTable || row.mapId != mapId)
+            continue;
+        if (row.distance < anyDistance)
+        {
+            any = int32_t(i);
+            anyDistance = row.distance;
+        }
+        if (row.spawned && row.distance < spawnedDistance)
+        {
+            spawned = int32_t(i);
+            spawnedDistance = row.distance;
+        }
+    }
+    return spawned >= 0 ? spawned : any;
+}
+
+struct TurnInPoint
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
+inline float TurnInPointDistance(TurnInPoint const& point, float x, float y, float z)
+{
+    float const dx = point.x - x;
+    float const dy = point.y - y;
+    float const dz = point.z - z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// Last path point that can gossip with the ender. Otherwise the closest reachable point.
+inline int32_t TurnInPathIndex(TurnInPoint const* points, std::size_t count, float enderX, float enderY, float enderZ, float interactYards, bool& withinRange)
+{
+    withinRange = false;
+    if (!points || count == 0)
+        return -1;
+    int32_t closest = 0;
+    float closestDistance = TurnInPointDistance(points[0], enderX, enderY, enderZ);
+    int32_t within = -1;
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        float const distance = TurnInPointDistance(points[i], enderX, enderY, enderZ);
+        if (distance < closestDistance)
+        {
+            closest = int32_t(i);
+            closestDistance = distance;
+        }
+        if (distance <= interactYards)
+            within = int32_t(i);
+    }
+    if (within >= 0)
+    {
+        withinRange = true;
+        return within;
+    }
+    return closest;
+}
+
+struct RewardChoiceFact
+{
+    uint32_t itemId = 0;
+    uint8_t itemClass = 0;
+    uint8_t subclass = 0;
+    int32_t allowableClass = -1;
+};
+
+inline bool ClassCanUseReward(int32_t allowableClass, uint8_t botClass)
+{
+    if (allowableClass <= 0 || botClass == 0)
+        return true;
+    if (botClass > 31)
+        return false;
+    return (allowableClass & (1 << (botClass - 1))) != 0;
+}
+
+// Mail for warrior, paladin, hunter, and shaman. Leather for rogue and druid.
+// Plate for death knight. Cloth for everyone else.
+inline uint8_t PreferredArmorSubclass(uint8_t botClass)
+{
+    switch (botClass)
+    {
+        case 1:
+        case 2:
+        case 3:
+        case 7:
+            return 3;
+        case 4:
+        case 11:
+            return 2;
+        case 6:
+            return 4;
+        default:
+            return 1;
+    }
+}
+
+// Lowest index that matches the class armor, else the first usable item, else index 0.
+// No choices returns 0 so a money or XP reward can be taken.
+inline uint32_t SelectRewardChoice(RewardChoiceFact const* choices, std::size_t count, uint8_t botClass)
+{
+    uint32_t first = 0;
+    uint32_t usable = 0;
+    uint32_t armor = 0;
+    uint8_t const preferred = PreferredArmorSubclass(botClass);
+    if (!choices)
+        return 0;
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        if (!choices[i].itemId)
+            continue;
+        if (!first)
+            first = choices[i].itemId;
+        if (!ClassCanUseReward(choices[i].allowableClass, botClass))
+            continue;
+        if (!usable)
+            usable = choices[i].itemId;
+        bool const armorClass = choices[i].itemClass == 4;
+        bool const shield = choices[i].subclass == 6 && (preferred == 3 || preferred == 4);
+        bool const preferredArmor = armorClass && (choices[i].subclass == preferred || (preferred == 4 && choices[i].subclass == 3) || shield);
+        if (!armor && preferredArmor)
+            armor = choices[i].itemId;
+    }
+    if (armor)
+        return armor;
+    if (usable)
+        return usable;
+    return first;
 }
 
 enum class ObjectivePlan : uint8_t

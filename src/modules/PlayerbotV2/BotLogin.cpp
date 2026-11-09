@@ -25,6 +25,7 @@
 #include "GameTime.h"
 #include "Loot.h"
 #include "LootItemType.h"
+#include "ItemTemplate.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
 #include "Group.h"
@@ -76,6 +77,8 @@ std::vector<LiveLogin> g_logins;
 }
 
 bool AcknowledgeBotTeleport(Player* bot);
+bool PlayerbotDebug();
+void WritePlayerbotLine(std::string const& line);
 
 void HoldCreateSession(std::shared_ptr<BotSession> session, std::shared_ptr<bool> finished)
 {
@@ -524,6 +527,28 @@ bool MeleeGaveUp(Player* bot, Unit* target)
         return false;
     BlacklistMeleeTarget(bot, target->GetGUID());
     return true;
+}
+
+void MaybeForceDeath(Player* bot, Unit* target)
+{
+    int32 const threshold = sConfigMgr->GetIntDefault("Playerbot.Debug.ForceDeathAfterKills", 0);
+    if (threshold <= 0 || !bot || !bot->IsAlive() || !target || target->IsAlive())
+        return;
+    static std::unordered_map<uint64_t, std::unordered_set<uint64_t>> counted;
+    static std::unordered_set<uint64_t> forced;
+    uint64_t const botId = bot->GetGUID().GetCounter();
+    if (forced.contains(botId))
+        return;
+    if (!counted[botId].insert(target->GetGUID().GetCounter()).second)
+        return;
+    if (int32(counted[botId].size()) < threshold)
+        return;
+    forced.insert(botId);
+    if (PlayerbotDebug())
+        WritePlayerbotLine(Trinity::StringFormat(
+            "bot {} {} state=dead reason=force-death kills={}",
+            bot->GetName(), bot->GetGUID().ToString(), counted[botId].size()));
+    Unit::Kill(bot, bot);
 }
 
 void EngageHostile(Player* bot, Unit* target, MeleeTrace& trace)
@@ -1037,6 +1062,17 @@ uint32_t HeldQuestCount(Player const* bot)
     return held;
 }
 
+bool HasCompletedQuest(Player const* bot)
+{
+    for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+    {
+        uint32_t const questId = bot->GetQuestSlotQuestId(slot);
+        if (questId && bot->GetQuestStatus(questId) == QUEST_STATUS_COMPLETE)
+            return true;
+    }
+    return false;
+}
+
 bool HasOpenSeekObjective(Player const* bot)
 {
     for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
@@ -1205,7 +1241,7 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
         }
 
         DebugQuestBranch(bot, SeekQuestBeforePrey(HeldQuestCount(bot)) ? "empty-log" : "have-log");
-        if (!HasOpenSeekObjective(bot) && SeekQuestBeforePrey(HeldQuestCount(bot)) && DiscoverQuestOffer(bot, pvpEnabled))
+        if (!HasCompletedQuest(bot) && !HasOpenSeekObjective(bot) && SeekQuestBeforePrey(HeldQuestCount(bot)) && DiscoverQuestOffer(bot, pvpEnabled))
         {
             DebugDecision(bot, "seek", "quest-offer", nullptr, nullptr);
             continue;
@@ -1250,11 +1286,12 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
             }
             MeleeTrace trace;
             EngageHostile(bot, target, trace);
+            MaybeForceDeath(bot, target);
             TryLootQuestItems(bot, target);
             DebugDecision(bot, "melee", HostileRefuseReason(facts), target, &scan, 0, &trace);
             continue;
         }
-        if (!HasOpenSeekObjective(bot) && DiscoverQuestOffer(bot, pvpEnabled))
+        if (!HasCompletedQuest(bot) && !HasOpenSeekObjective(bot) && DiscoverQuestOffer(bot, pvpEnabled))
         {
             DebugDecision(bot, "seek", "quest-offer", nullptr, &scan);
             continue;
@@ -1535,22 +1572,140 @@ bool WanderInsideLeash(Player* bot)
     return MoveToward(bot, x, y);
 }
 
-bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
+void LogTurnIn(Player const* bot, char const* reason, uint32 questId, uint32 entry, float distance, uint32 status, uint32 xp)
 {
-    combatTarget = nullptr;
-    Destination best;
+    if (!PlayerbotDebug() || !bot)
+        return;
+    std::string const signature = Trinity::StringFormat("turnin|{}|{}|{}", questId, entry, reason ? reason : "");
+    if (!DebugDue(bot->GetGUID().GetCounter(), signature))
+        return;
+    WritePlayerbotLine(Trinity::StringFormat(
+        "bot {} {} state=turn-in reason={} quest={} entry={} dist={:.1f} status={} xp={}",
+        bot->GetName(), bot->GetGUID().ToString(), reason ? reason : "", questId, entry, distance, status, xp));
+}
 
+uint32 ChooseQuestReward(Player const* bot, Quest const* quest)
+{
+    RewardChoiceFact facts[QUEST_REWARD_CHOICES_COUNT];
+    std::size_t count = 0;
+    for (uint32 index = 0; index < QUEST_REWARD_CHOICES_COUNT; ++index)
+    {
+        uint32 const itemId = quest->RewardChoiceItemId[index];
+        if (!itemId)
+            continue;
+        RewardChoiceFact& fact = facts[count++];
+        fact.itemId = itemId;
+        if (ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId))
+        {
+            fact.itemClass = uint8_t(proto->GetClass());
+            fact.subclass = uint8_t(proto->GetSubClass());
+            fact.allowableClass = proto->GetAllowableClass();
+        }
+    }
+    if (count == 0)
+        return 0;
+    return SelectRewardChoice(facts, count, bot->GetClass());
+}
+
+char const* RewardRefuseReason(Player const* bot, Quest const* quest, uint32 choiceId)
+{
+    if (bot->GetQuestStatus(quest->GetQuestId()) != QUEST_STATUS_COMPLETE && !quest->IsTurnIn())
+        return "status";
+    if (bot->GetQuestRewardStatus(quest->GetQuestId()))
+        return "already-rewarded";
+    if (!bot->SatisfyQuestLevel(quest, false))
+        return "level";
+    if (uint32 const cost = quest->GetClassicRequiredMoney())
+        if (!bot->HasEnoughMoney(uint64(cost)))
+            return "missing-money";
+    for (QuestObjective const& objective : quest->GetObjectives())
+        if (objective.Type == QUEST_OBJECTIVE_ITEM && objective.ObjectID > 0 && bot->GetItemCount(uint32(objective.ObjectID)) < uint32(objective.Amount))
+            return "missing-items";
+    if (!bot->CanRewardQuest(quest, false))
+        return "cannot-reward";
+    if (quest->GetRewChoiceItemsCount() > 0 && choiceId == 0)
+        return "reward-choice";
+    if (!bot->CanRewardQuest(quest, LootItemType::Item, choiceId, false))
+        return "bag-full";
+    return nullptr;
+}
+
+bool ApproachEnder(Player* bot, float x, float y, float z, float interactYards, char const*& detail)
+{
+    PathGenerator path(bot);
+    bool const calculated = path.CalculatePath(x, y, z);
+    uint32 const type = uint32(path.GetPathType());
+    Movement::PointsArray const& raw = path.GetPath();
+    if (!CorePathIsUsable(calculated, type) || raw.size() < 2)
+    {
+        detail = "path-fail";
+        return false;
+    }
+    std::vector<TurnInPoint> points;
+    points.reserve(raw.size());
+    for (G3D::Vector3 const& point : raw)
+        points.push_back(TurnInPoint{ point.x, point.y, point.z });
+    bool within = false;
+    TurnInPathIndex(points.data(), points.size(), x, y, z, interactYards, within);
+    bool const incomplete = (type & 0x04) != 0 || (type & 0x80) != 0;
+    detail = (incomplete && !within) ? "path-partial" : "out-of-range";
+    G3D::Vector3 const step = raw[1];
+    if (!LocalStepPoint(step.x - bot->GetPositionX(), step.y - bot->GetPositionY(), step.z - bot->GetPositionZ()))
+    {
+        detail = "path-fail";
+        return false;
+    }
+    MovementGeneratorType const motion = bot->GetMotionMaster()->GetCurrentMovementGeneratorType();
+    if (motion != POINT_MOTION_TYPE && motion != CHASE_MOTION_TYPE)
+        bot->GetMotionMaster()->MovePoint(1, step.x, step.y, step.z);
+    return true;
+}
+
+void AcceptFollowUp(Player* bot, Creature* giver)
+{
+    if (!bot || !giver || !giver->HasNpcFlag(UNIT_NPC_FLAG_QUESTGIVER))
+        return;
+    for (uint32 questId : sObjectMgr->GetCreatureQuestRelations(giver->GetEntry()))
+    {
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        if (!quest)
+            continue;
+        QuestStatus const status = bot->GetQuestStatus(questId);
+        bool const inLog = status == QUEST_STATUS_INCOMPLETE || status == QUEST_STATUS_COMPLETE || status == QUEST_STATUS_FAILED;
+        if (inLog || bot->IsQuestRewarded(questId))
+            continue;
+        if (!bot->CanTakeQuest(quest, false) || !bot->CanAddQuest(quest, false))
+            continue;
+        bot->AddQuest(quest, giver);
+        if (PlayerbotDebug())
+            WritePlayerbotLine(Trinity::StringFormat(
+                "bot {} {} state=quest reason=follow-up quest={} entry={}",
+                bot->GetName(), bot->GetGUID().ToString(), questId, giver->GetEntry()));
+        return;
+    }
+}
+
+bool TurnInCompletedQuest(Player* bot)
+{
+    uint32_t bestQuestId = 0;
+    Quest const* bestQuest = nullptr;
+    Destination best;
+    bool sawComplete = false;
+    bool sawRow = false;
     for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
     {
         uint32_t const questId = bot->GetQuestSlotQuestId(slot);
-        if (!questId)
+        if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
             continue;
+        sawComplete = true;
         Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
-        if (!quest || bot->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
+        if (!quest)
             continue;
         Destination ender;
+        bool row = false;
         for (auto const& relation : sObjectMgr->GetCreatureQuestInvolvedRelationReverseBounds(questId))
         {
+            row = true;
             uint32 const entry = relation.second;
             bool live = false;
             for (Creature* creature : LiveEntries(bot, GiverSeekYards, entry))
@@ -1566,6 +1721,7 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
         }
         for (auto const& relation : sObjectMgr->GetGOQuestInvolvedRelationReverseBounds(questId))
         {
+            row = true;
             uint32 const entry = relation.second;
             bool live = false;
             for (GameObject* object : LiveObjects(bot, GiverSeekYards, entry))
@@ -1579,26 +1735,93 @@ bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
             if (NearestSpawn(false, bot->GetMapId(), entry, bot->GetPositionX(), bot->GetPositionY(), x, y, z, distance))
                 NoteSpawn(ender, x, y, z, distance, entry, false, false, true);
         }
-        if (!ender.known)
+        if (row)
+            sawRow = true;
+        if (!ender.known || (best.known && ender.distance >= best.distance))
             continue;
-        bool const choice = quest->GetRewChoiceItemsCount() > 0;
-        bool const canReward = bot->CanRewardQuest(quest, false) && bot->CanRewardQuest(quest, LootItemType::Item, 0, false);
-        if (ender.creature && ender.distance <= INTERACTION_DISTANCE && MayTurnInQuest(true, canReward, true, choice))
-        {
-            bot->RewardQuest(quest, LootItemType::Item, 0, ender.creature, true);
-            return true;
-        }
-        if (ender.object && ender.distance <= INTERACTION_DISTANCE)
-        {
-            ender.object->Use(bot);
-            return true;
-        }
-        if (MoveToward(bot, ender.x, ender.y))
-        {
-            DebugDecision(bot, "seek", "turn-in", ender.creature, nullptr, ender.entry);
-            return true;
-        }
+        best = ender;
+        bestQuestId = questId;
+        bestQuest = quest;
     }
+    if (!sawComplete)
+        return false;
+    if (!best.known || !bestQuest)
+    {
+        LogTurnIn(bot, sawRow ? "ender-not-spawned" : "ender-not-found", bestQuestId, 0, -1.0f, uint32(QUEST_STATUS_COMPLETE), 0);
+        return true;
+    }
+
+    uint32 const status = uint32(bot->GetQuestStatus(bestQuestId));
+    if (best.creature)
+    {
+        float const limit = GossipInteractYards(best.creature->GetCombatReach());
+        bool const inRange = best.creature->IsWithinDistInMap(bot, limit);
+        Creature* npc = inRange ? bot->GetNPCIfCanInteractWith(best.creature->GetGUID(), UNIT_NPC_FLAG_QUESTGIVER, UNIT_NPC_FLAG_2_NONE) : nullptr;
+        if (npc)
+        {
+            uint32 const choice = ChooseQuestReward(bot, bestQuest);
+            if (char const* const block = RewardRefuseReason(bot, bestQuest, choice))
+            {
+                LogTurnIn(bot, block, bestQuestId, best.entry, bot->GetExactDist(best.creature), status, 0);
+                return true;
+            }
+            uint32 const xp = bestQuest->XPValue(bot);
+            bot->RewardQuest(bestQuest, LootItemType::Item, choice, npc, true);
+            LogTurnIn(bot, "rewarded", bestQuestId, best.entry, bot->GetExactDist(npc), status, xp);
+            AcceptFollowUp(bot, npc);
+            return true;
+        }
+        if (inRange)
+        {
+            char const* reason = "cannot-interact";
+            if (!best.creature->HasNpcFlag(UNIT_NPC_FLAG_QUESTGIVER))
+                reason = "cannot-interact-npcflag";
+            else if (!best.creature->IsInteractionAllowedWhileHostile() && best.creature->GetReactionTo(bot) <= REP_UNFRIENDLY)
+                reason = "cannot-interact-faction";
+            LogTurnIn(bot, reason, bestQuestId, best.entry, bot->GetExactDist(best.creature), status, 0);
+            return true;
+        }
+        char const* detail = "out-of-range";
+        ApproachEnder(bot, best.x, best.y, best.z, limit, detail);
+        LogTurnIn(bot, detail, bestQuestId, best.entry, bot->GetExactDist(best.creature), status, 0);
+        return true;
+    }
+
+    if (best.object)
+    {
+        GameObject* object = bot->GetGameObjectIfCanInteractWith(best.object->GetGUID());
+        if (object)
+        {
+            uint32 const choice = ChooseQuestReward(bot, bestQuest);
+            if (char const* const block = RewardRefuseReason(bot, bestQuest, choice))
+            {
+                LogTurnIn(bot, block, bestQuestId, best.entry, bot->GetExactDist(object), status, 0);
+                return true;
+            }
+            uint32 const xp = bestQuest->XPValue(bot);
+            bot->RewardQuest(bestQuest, LootItemType::Item, choice, object, true);
+            LogTurnIn(bot, "rewarded", bestQuestId, best.entry, bot->GetExactDist(object), status, xp);
+            return true;
+        }
+        char const* detail = "out-of-range";
+        ApproachEnder(bot, best.x, best.y, best.z, INTERACTION_DISTANCE, detail);
+        LogTurnIn(bot, best.object ? detail : "ender-not-spawned", bestQuestId, best.entry, best.distance, status, 0);
+        return true;
+    }
+
+    char const* detail = "ender-not-spawned";
+    ApproachEnder(bot, best.x, best.y, best.z, INTERACTION_DISTANCE, detail);
+    LogTurnIn(bot, detail, bestQuestId, best.entry, best.distance, status, 0);
+    return true;
+}
+
+bool ActOnStarterQuest(Player* bot, bool pvpEnabled, Unit*& combatTarget)
+{
+    combatTarget = nullptr;
+    Destination best;
+
+    if (TurnInCompletedQuest(bot))
+        return true;
 
     for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
     {

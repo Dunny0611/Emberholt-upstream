@@ -40,6 +40,11 @@ Playerbot.PvP = 0
 # Also add to worldserver.conf: Logger.playerbot=3,Console Server
 Playerbot.Debug = 0
 
+# Scratch only. After this many killing blows, one owned bot dies so the ghost,
+# teleport-ack, and resurrect path can be observed. 0 leaves combat alone.
+# Ignored unless the world is a private scratch. Default must stay 0.
+Playerbot.Debug.ForceDeathAfterKills = 0
+
 # Persisted characters and marker rows per pool account, not the online cap.
 # Online count is Playerbot.Population.*. 25 online needs that cap plus enough
 # account ids that MaxCharacters times the account count can hold them.

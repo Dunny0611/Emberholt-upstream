@@ -81,6 +81,14 @@ applies that directory by itself.
    An incomplete kill, object, or talk objective is preferred out to 120
    yards, then by the nearest spawn of that entry on the same map. While
    that objective is open the bot does not walk back to a quest giver.
+   A completed quest is turned in before any new giver is sought. The ender
+   comes from creature_questender or gameobject_questender. The path uses
+   the ender's position, including a cave floor. A partial path walks to the
+   closest reachable point that is still inside gossip range (combat reach
+   plus 4 yards, the same check as GetNPCIfCanInteractWith). Reward choices
+   pick the class armor match, else the first usable item, else index 0.
+   Money and XP rewards use choice 0. The rewarded line is
+   state=turn-in reason=rewarded. The same NPC is then asked for a follow-up.
    A complete quest walks to its ender. With nothing to walk to, legal prey
    is sought out to 80 yards. An empty log, or a log with no seek objective,
    checks other questgivers out to 120 yards. Otherwise the bot walks
@@ -103,7 +111,9 @@ applies that directory by itself.
    There is no travel teleport, capital move, level change, experience grant,
    or spell teach. A harmful spell is cast only when it is already in the
    spellbook, off cooldown, and in range. Otherwise the bot uses Attack.
-   Death uses the core release-spirit and corpse-reclaim checks. A ghost
+   Playerbot.Debug.ForceDeathAfterKills defaults to 0. A scratch run can set
+   it above 0 to kill one bot after that many killing blows so the teleport
+   ack and resurrect path run. Death uses the core release-spirit and corpse-reclaim checks. A ghost
    with a corpse on this map walks toward it. A ghost with no corpse walks
    to the spirit healer or the closest graveyard, then calls the healer
    resurrect: ResurrectPlayer(0.5), 25% durability loss, SpawnCorpseBones.
