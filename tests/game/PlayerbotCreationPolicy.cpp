@@ -49,7 +49,11 @@ using Playerbot::V2::SwingAction;
 using Playerbot::V2::SwingCallsAttack;
 using Playerbot::V2::SwingFacts;
 using Playerbot::V2::ChooseSeek;
+using Playerbot::V2::AttackAllowed;
+using Playerbot::V2::IsMajorCityFaction;
 using Playerbot::V2::JudgeHostile;
+using Playerbot::V2::NeedsSetAtWar;
+using Playerbot::V2::ValidAttackAfterAtWar;
 using Playerbot::V2::LeashedStep;
 using Playerbot::V2::MapSpawn;
 using Playerbot::V2::NearestSpawnIndex;
@@ -749,6 +753,61 @@ TEST_CASE("A running melee timer is not reset, and an empty quest log seeks a gi
     CHECK(SeekQuestBeforePrey(0));
     CHECK_FALSE(SeekQuestBeforePrey(1));
 
+    auto beast = [](uint32_t factionId, int32_t reputationIndex)
+    {
+        HostileFacts facts;
+        facts.creature = true;
+        facts.alive = true;
+        facts.canSee = true;
+        facts.level = 1;
+        facts.botLevel = 1;
+        facts.distance = 10.0f;
+        facts.reputationFaction = factionId;
+        facts.hasReputation = reputationIndex >= 0;
+        facts.majorCity = IsMajorCityFaction(factionId);
+        return facts;
+    };
+    // Public Faction.db2: Creature 7, Beast - Boar 23, and Beast - Wolf 29 have ReputationIndex -1.
+    // Mottled Boar (template 189 -> 7) and Ragged Young Wolf (template 32 -> 29) need no at-war flag.
+    HostileFacts boar = beast(7, -1);
+    HostileFacts wolf = beast(29, -1);
+    CHECK_FALSE(NeedsSetAtWar(boar));
+    CHECK_FALSE(NeedsSetAtWar(wolf));
+    CHECK(ValidAttackAfterAtWar(boar));
+    CHECK(ValidAttackAfterAtWar(wolf));
+    CHECK(AttackAllowed(boar) == false);
+    boar.validAttack = true;
+    wolf.validAttack = true;
+    CHECK(AttackAllowed(boar));
+    CHECK(AttackAllowed(wolf));
+    CHECK(JudgeHostile(boar) == HostileUse::Approach);
+
+    HostileFacts repBeast = beast(999, 40);
+    repBeast.peaceful = false;
+    CHECK(NeedsSetAtWar(repBeast));
+    CHECK(ValidAttackAfterAtWar(repBeast));
+    CHECK(AttackAllowed(repBeast));
+    repBeast.atWar = true;
+    CHECK_FALSE(NeedsSetAtWar(repBeast));
+    CHECK(ValidAttackAfterAtWar(repBeast));
+    repBeast.atWar = false;
+    repBeast.peaceful = true;
+    CHECK_FALSE(NeedsSetAtWar(repBeast));
+    CHECK_FALSE(AttackAllowed(repBeast));
+
+    uint32_t const cities[] = { 47u, 54u, 69u, 72u, 76u, 530u, 68u, 81u };
+    for (uint32_t factionId : cities)
+    {
+        HostileFacts city = beast(factionId, 20);
+        city.templateFriendly = true;
+        city.friendlyTo = true;
+        city.ownSide = true;
+        CHECK(city.majorCity);
+        CHECK_FALSE(NeedsSetAtWar(city));
+        CHECK_FALSE(AttackAllowed(city));
+        CHECK_FALSE(ValidAttackAfterAtWar(city));
+    }
+
     CHECK_FALSE(MeleeTargetUnreachable(3000, 42, 42));
     CHECK(MeleeTargetUnreachable(8000, 42, 42));
     CHECK_FALSE(MeleeTargetUnreachable(8000, 42, 41));
@@ -795,4 +854,5 @@ TEST_CASE("Follow stays near the leader and death uses release, walk, or reclaim
     CHECK(ChooseRecovery(false, true, true, false, false, true) == RecoveryKind::WalkToCorpse);
     CHECK(ChooseRecovery(false, true, true, false, false, false) == RecoveryKind::Hold);
     CHECK(ChooseRecovery(false, true, true, true, true, false) == RecoveryKind::Reclaim);
+    CHECK(ChooseRecovery(false, true, false, false, false, false) == RecoveryKind::SpiritHealer);
 }

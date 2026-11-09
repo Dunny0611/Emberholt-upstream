@@ -34,7 +34,6 @@
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "PathGenerator.h"
-#include "PhasingHandler.h"
 #include "PetDefines.h"
 #include "Player.h"
 #include "RealmList.h"
@@ -232,9 +231,26 @@ HostileFacts FactsFor(Player const* bot, Unit const* unit, bool pvpEnabled)
         facts.totem = creature->IsTotem();
         facts.pet = creature->IsPet();
         facts.level = creature->GetLevel();
-        ApplyFactionRelation(facts, ReadTemplate(creature->GetFactionTemplateEntry()), ReadTemplate(bot->GetFactionTemplateEntry()));
+        FactionTemplateEntry const* theirs = creature->GetFactionTemplateEntry();
+        ApplyFactionRelation(facts, ReadTemplate(theirs), ReadTemplate(bot->GetFactionTemplateEntry()));
         if (facts.factionTemplate == 0)
             facts.factionTemplate = unit->GetFaction();
+        facts.canSee = bot->CanSeeOrDetect(unit);
+        if (theirs)
+        {
+            facts.reputationFaction = theirs->Faction;
+            facts.majorCity = IsMajorCityFaction(theirs->Faction);
+            if (FactionEntry const* faction = sFactionStore.LookupEntry(theirs->Faction))
+            {
+                facts.hasReputation = faction->CanHaveReputation();
+                if (FactionState const* state = bot->GetReputationMgr().GetState(faction))
+                {
+                    facts.atWar = state->Flags.HasFlag(ReputationFlags::AtWar);
+                    facts.peaceful = state->Flags.HasFlag(ReputationFlags::Peaceful);
+                }
+            }
+            facts.ownSide = facts.majorCity && facts.templateFriendly;
+        }
     }
     return facts;
 }
@@ -313,6 +329,15 @@ void TryMarkAtWar(Player* bot, Unit* target)
     FactionEntry const* faction = sFactionStore.LookupEntry(factionTemplate->Faction);
     if (!faction || !faction->CanHaveReputation() || bot->GetReputationMgr().IsAtWar(faction))
         return;
+    if (IsMajorCityFaction(faction->ID))
+        return;
+    if (FactionState const* state = bot->GetReputationMgr().GetState(faction))
+        if (state->Flags.HasFlag(ReputationFlags::Peaceful))
+            return;
+    if (FactionTemplateEntry const* theirs = creature->GetFactionTemplateEntry())
+        if (FactionTemplateEntry const* mine = bot->GetFactionTemplateEntry())
+            if (theirs->IsFriendlyTo(mine) || mine->IsFriendlyTo(theirs))
+                return;
     bot->GetReputationMgr().SetAtWarForCombat(faction);
 }
 
@@ -504,6 +529,8 @@ uint32_t FindKnownHarmfulSpell(Player* bot, Unit* target)
     return 0;
 }
 
+bool ResurrectAtSpiritHealer(Player* bot);
+
 bool RecoverOwnedBot(Player* bot)
 {
     bool const ghost = bot->HasPlayerFlag(PLAYER_FLAGS_GHOST);
@@ -560,6 +587,8 @@ bool RecoverOwnedBot(Player* bot)
             if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
                 WalkLocalStep(bot, stored.GetPositionX(), stored.GetPositionY());
             return true;
+        case RecoveryKind::SpiritHealer:
+            return ResurrectAtSpiritHealer(bot);
         case RecoveryKind::Hold:
         case RecoveryKind::None:
             return !alive || ghost;
@@ -664,6 +693,37 @@ std::list<Creature*> CollectCreatures(Player* bot, float range, ScanStats& stats
     bot->GetCreatureListWithOptionsInGrid(creatures, range, options);
     stats.raw = uint32_t(creatures.size());
     return creatures;
+}
+
+bool ResurrectAtSpiritHealer(Player* bot)
+{
+    if (bot->RefuseHardcoreResurrect() || bot->IsBeingTeleported())
+        return true;
+    if (WorldSafeLocsEntry const* grave = sObjectMgr->GetClosestGraveyard(*bot, bot->GetTeam(), bot))
+    {
+        if (grave->Loc.GetMapId() == bot->GetMapId() && bot->GetExactDist(grave->Loc) > 8.0f)
+        {
+            WalkLocalStep(bot, grave->Loc.GetPositionX(), grave->Loc.GetPositionY());
+            return true;
+        }
+    }
+    ScanStats nearby;
+    for (Creature* creature : CollectCreatures(bot, 30.0f, nearby))
+    {
+        if (!creature || !creature->HasNpcFlag(UNIT_NPC_FLAG_SPIRIT_HEALER))
+            continue;
+        if (bot->GetDistance(creature) > INTERACTION_DISTANCE)
+        {
+            WalkLocalStep(bot, creature->GetPositionX(), creature->GetPositionY());
+            return true;
+        }
+        bot->GetSession()->SendSpiritResurrect();
+        return true;
+    }
+    // No spawned healer. SendSpiritResurrect is what the healer's activate handler calls:
+    // half health, normal resurrection sickness, 25% durability.
+    bot->GetSession()->SendSpiritResurrect();
+    return true;
 }
 
 Unit* SelectHostile(Player* bot, Player* leader, bool pvpEnabled, ScanStats& stats)
@@ -811,24 +871,6 @@ void DebugDecision(Player const* bot, char const* state, char const* reason, Uni
         TC_LOG_INFO("server.worldserver", "playerbot {}", line);
 }
 
-void EnsureWorldPhase(Player* bot)
-{
-    uint32 zone = 0;
-    uint32 area = 0;
-    bot->GetMap()->GetZoneAndAreaId(bot->GetPhaseShift(), zone, area, *bot);
-    static std::unordered_map<uint64_t, uint32> appliedArea;
-    uint32& previous = appliedArea[bot->GetGUID().GetCounter()];
-    if (previous == area && area != 0)
-        return;
-    previous = area;
-    // Same server-side calls as SendInitialPacketsAfterAddToMap. Packets are dropped for a bot,
-    // but the phase shift, zone, and visibility updates still have to run after the grid exists.
-    PhasingHandler::OnMapChange(bot);
-    if (zone || area)
-        bot->UpdateZone(zone, area);
-    bot->UpdateObjectVisibility(false);
-}
-
 void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
 {
     if (g_logins.empty())
@@ -854,11 +896,16 @@ void StepOneOwnedBot(bool pvpEnabled, uint32_t diff)
             continue;
         }
         ++steps;
-        EnsureWorldPhase(bot);
         if (RecoverOwnedBot(bot))
         {
-            DebugDecision(bot, bot->HasPlayerFlag(PLAYER_FLAGS_GHOST) ? "ghost" : "dead",
-                bot->HasCorpse() ? "recovery" : "no-corpse-location", nullptr, nullptr);
+            bool const ghost = bot->HasPlayerFlag(PLAYER_FLAGS_GHOST);
+            bool const corpseHere = bot->HasCorpse() && bot->GetCorpseLocation().GetMapId() == bot->GetMapId();
+            char const* reason = "recovery";
+            if (ghost && !corpseHere)
+                reason = "spirit-healer";
+            else if (!bot->HasCorpse())
+                reason = "no-corpse-location";
+            DebugDecision(bot, ghost ? "ghost" : "dead", reason, nullptr, nullptr);
             continue;
         }
 

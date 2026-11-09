@@ -121,9 +121,64 @@ struct HostileFacts
     int32_t reaction = 0;
     bool hostileTo = false;
     bool friendlyTo = false;
-    bool hostileFrom = false;
     bool friendlyFrom = false;
+    bool hostileFrom = false;
+    bool canSee = false;
+    bool hasReputation = false;
+    bool atWar = false;
+    bool peaceful = false;
+    bool majorCity = false;
+    bool ownSide = false;
+    uint32_t reputationFaction = 0;
 };
+
+// Public Faction.db2 rows. ReputationIndex < 0 means the faction has no reputation state,
+// so IsValidAttackTarget does not look at at-war. These city rows do have reputation.
+inline bool IsMajorCityFaction(uint32_t factionId)
+{
+    switch (factionId)
+    {
+        case 47:   // Ironforge
+        case 54:   // Gnomeregan
+        case 68:   // Undercity
+        case 69:   // Darnassus
+        case 72:   // Stormwind
+        case 76:   // Orgrimmar
+        case 81:   // Thunder Bluff
+        case 530:  // Darkspear Trolls
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Set at-war only when a real player could right-click attack and the faction has a reputation row.
+// No reputation row: the attack check does not consult at-war. Peaceful, city, and own-side factions stay untouched.
+inline bool NeedsSetAtWar(HostileFacts const& facts)
+{
+    return facts.hasReputation && !facts.atWar && !facts.peaceful && !facts.majorCity && !facts.ownSide
+        && facts.canSee && !facts.friendlyTo && !facts.friendlyFrom && !facts.templateFriendly;
+}
+
+// True when IsValidAttackTarget is already true, or it would be after the at-war flag above.
+inline bool AttackAllowed(HostileFacts const& facts)
+{
+    if (facts.validAttack)
+        return true;
+    return NeedsSetAtWar(facts);
+}
+
+// After NeedsSetAtWar is applied, the at-war gate inside IsValidAttackTarget is open.
+inline bool ValidAttackAfterAtWar(HostileFacts facts)
+{
+    if (NeedsSetAtWar(facts))
+        facts.atWar = true;
+    if (!facts.canSee || facts.friendlyTo || facts.friendlyFrom || facts.templateFriendly)
+        return false;
+    if (facts.hasReputation && !facts.atWar)
+        return false;
+    return true;
+}
 
 // Hostile by template, or neutral toward this player. Friendly templates are not prey.
 // A zero id means the template was missing, which is not treated as neutral prey.
@@ -162,7 +217,7 @@ inline HostileUse JudgeHostile(HostileFacts const& facts, float approachYards = 
         return HostileUse::Refuse;
     else if (facts.nonCombatService)
         return HostileUse::Refuse;
-    else if (!facts.validAttack)
+    else if (!AttackAllowed(facts))
         return HostileUse::Refuse;
     uint8_t const bandLevel = facts.level == 0 && facts.creature ? uint8_t(1) : facts.level;
     if (bandLevel == 0 || uint32_t(bandLevel) > uint32_t(facts.botLevel) + LevelHeadroom)
@@ -271,7 +326,7 @@ inline char const* HostileRefuseReason(HostileFacts const& facts)
         return "not-attackable";
     if (facts.nonCombatService)
         return "civilian";
-    if (!facts.validAttack)
+    if (!AttackAllowed(facts))
         return "not-valid-attack";
     return "level-or-range";
 }
@@ -360,10 +415,11 @@ enum class RecoveryKind : uint8_t
     ReleaseSpirit,
     WalkToCorpse,
     Reclaim,
+    SpiritHealer,
     Hold
 };
 
-// Release and reclaim are the core death actions. A ghost without a usable path waits.
+// Release and reclaim are the core death actions. A ghost with no corpse on this map uses the spirit healer.
 inline RecoveryKind ChooseRecovery(bool alive, bool ghost, bool hasCorpse, bool corpseDelayDone, bool corpseInRange, bool pathUsable)
 {
     if (alive && !ghost)
@@ -374,6 +430,8 @@ inline RecoveryKind ChooseRecovery(bool alive, bool ghost, bool hasCorpse, bool 
         return RecoveryKind::Reclaim;
     if (ghost && hasCorpse && pathUsable)
         return RecoveryKind::WalkToCorpse;
+    if (ghost && !hasCorpse)
+        return RecoveryKind::SpiritHealer;
     return RecoveryKind::Hold;
 }
 }
